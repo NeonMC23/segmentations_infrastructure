@@ -1,0 +1,2258 @@
+
+############
+#
+# Copyright (c) 2024 Joseph DelPreto / MIT CSAIL and Project CETI
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+# IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# Created 2023-2024 by Joseph DelPreto [https://josephdelpreto.com].
+# [add additional updates and authors as desired]
+#
+############
+
+import numpy as np
+import scipy
+import h5py
+import os
+import shutil
+import distinctipy
+import glob
+from collections import OrderedDict
+import warnings
+
+try:
+  import ffmpeg
+except:
+  pass
+import cv2
+import decord
+import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon
+from matplotlib.patches import Circle
+
+from segmentation_infrastructure.helpers.helpers_various import *
+
+class Segmentations:
+  ###############################
+  # Initialization
+  ###############################
+  
+  def __init__(self, h5_filepath=None, writable=False,
+               frame_shape=None,
+               video_filepaths=None,  # a dictionary mapping a key to a filepath (example: {'myvid1': my_vid_1.mp4, 'myvid2': my_vid_2.mp4})
+               num_video_frames_to_save_as_images=0,  # -1 to save all frames
+               output_video_fps=30, video_compression=17, video_preset='veryfast'):
+    self._h5_filepath = h5_filepath
+    self._writable = writable
+    self._video_filepaths = video_filepaths if video_filepaths is not None else {}
+    self._output_video_fps = output_video_fps
+    # Set up saving frames as individual images if desired.
+    self._video_frame_image_dirs = {}
+    self._num_video_frames_to_save_as_images = num_video_frames_to_save_as_images
+    if self._num_video_frames_to_save_as_images != 0:
+      for (video_key, video_filepath) in self._video_filepaths.items():
+        (video_base_dir, video_filename) = os.path.split(video_filepath)
+        self._video_frame_image_dirs[video_key] = os.path.join(video_base_dir, 'frame_images_%s'%
+                                                               os.path.splitext(video_filename)[0])
+        os.makedirs(self._video_frame_image_dirs[video_key], exist_ok=True)
+        for image_filepath in glob.glob(os.path.join(self._video_frame_image_dirs[video_key], '*.jpg')):
+          os.remove(image_filepath)
+    
+    # Specify video compression.
+    # Lossless may not be compatible with all players.
+    #  If using lossless, preset should probably be ultrafast (faster encoding) or veryslow (better compression).
+    #  For visually lossless but not technically lossless, recommend compression of around 17.
+    # See https://trac.ffmpeg.org/wiki/Encode/H.264 for more information.
+    self._video_compression = video_compression # range 0-51: 0 is lossless, default is 23
+    self._video_preset = video_preset # faster easier to play back? [veryslow, slower, slow, medium, fast, veryfast, superfast, ultrafast]
+
+    # Initialize state.
+    self._dataset_expansion_size_frameDimension = 300
+    self._dataset_expansion_size_whaleDimension = 10
+    self._h5_compression_level = 9 # 0-9, default is 4
+    self._bounding_box_keys = ['full', 'head', 'tail']
+    self._datasets = {
+      'masks': None,
+      'centroids_xy': None,
+      'orientations_rad_confidence': None,
+      'frames_are_segmented': None,
+      'whale_segmentations_exist': None,
+      'whale_ids': None,
+    }
+    self._bounding_box_key_to_name = lambda key: 'bounding_boxes_%s_4xy' % key
+    self._bounding_box_names = [self._bounding_box_key_to_name(key) for key in self._bounding_box_keys]
+    for bounding_box_name in self._bounding_box_names:
+      self._datasets[bounding_box_name] = None
+    self._frame_shape = frame_shape
+    
+    # Initialize the HDF5 output.
+    self._h5_file = None
+    if self._h5_filepath is not None:
+      # Open the HDF5 file, creating it if it doesn't exist yet.
+      using_existing_file = os.path.exists(self._h5_filepath)
+      self._h5_file = h5py.File(self._h5_filepath, 'a' if self._writable else 'r')
+      # Prune the dataset names to the ones in the existing file.
+      if using_existing_file:
+        missing_datasets = [dataset_key for dataset_key in self._datasets if dataset_key not in self._h5_file]
+        for missing_dataset in missing_datasets:
+          del self._datasets[missing_dataset]
+      # Point to existing datasets if this is an existing file,
+      #  or create new ones if this is a new file.
+      for dataset_key in self._datasets:
+        if dataset_key in self._h5_file:
+          self._datasets[dataset_key] = self._h5_file[dataset_key]
+          if dataset_key in ['masks']:
+            self._frame_shape = self._h5_file[dataset_key].shape[2:]
+        elif dataset_key == 'masks' and self._writable and not using_existing_file:
+          matrix_shape = [0, 0, *frame_shape] # [frame, whale, frame_resolution]
+          max_matrix_shape = [None, None, *frame_shape] # [frame, whale, frame_resolution]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='uint8',
+                                                                     chunks=(1,1,*frame_shape),
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+        elif dataset_key in self._bounding_box_names and self._writable and not using_existing_file:
+          matrix_shape = [0, 0, 8] # [frame, whale, 4 xy coordinates]
+          max_matrix_shape = [None, None, 8] # [frame, whale, frame_resolution]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='float',
+                                                                     fillvalue=np.nan,
+                                                                     chunks=True,
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+        elif dataset_key == 'centroids_xy' and self._writable and not using_existing_file:
+          matrix_shape = [0, 0, 2] # [frame, whale, xy]
+          max_matrix_shape = [None, None, 2] # [frame, whale, xy]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='float',
+                                                                     fillvalue=np.nan,
+                                                                     chunks=True,
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+        elif dataset_key == 'orientations_rad_confidence' and self._writable and not using_existing_file:
+          matrix_shape = [0, 0, 2] # [frame, whale, rad-confidence]
+          max_matrix_shape = [None, None, 2] # [frame, whale, rad-confidence]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='float',
+                                                                     fillvalue=np.nan,
+                                                                     chunks=True,
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+        elif dataset_key == 'frames_are_segmented' and self._writable and not using_existing_file:
+          matrix_shape = [0, 1] # [frame, is_segmented]
+          max_matrix_shape = [None, 1] # [frame, is_segmented]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='uint8',
+                                                                     chunks=True,
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+        elif dataset_key == 'whale_segmentations_exist' and self._writable and not using_existing_file:
+          matrix_shape = [0, 0] # [frame, whale]
+          max_matrix_shape = [None, None] # [frame, whale]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='uint8',
+                                                                     chunks=True,
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+        elif dataset_key == 'whale_ids' and self._writable and not using_existing_file:
+          matrix_shape = [0, 1] # [whale, id]
+          max_matrix_shape = [None, 1] # [whale, id]
+          self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
+                                                                     matrix_shape,
+                                                                     maxshape=max_matrix_shape,
+                                                                     dtype='S128',
+                                                                     chunks=True,
+                                                                     compression='gzip',
+                                                                     compression_opts=self._h5_compression_level) # 0-9, default is 4
+    
+    # Store the number of frames.
+    self._num_frames = 0
+    for (dataset_name, dataset) in self._datasets.items():
+      if dataset_name != 'whale_ids': # whale_ids is the only one without frames as the first dimension
+        self._num_frames = dataset.shape[0]
+        break
+    
+    # Will store unique colors for each segmentation instance.
+    self._segmentations_colors = []
+    self._update_segmentation_colors()
+
+    # Open a reader for existing videos, or create an ffmpeg handle to write new ones.
+    self._video_readers = {}
+    self._ff_procs = {}
+    self._num_video_frames = {}
+    for (video_key, video_filepath) in self._video_filepaths.items():
+      if os.path.exists(video_filepath):
+        self._video_readers[video_key] = decord.VideoReader(video_filepath)
+        self._ff_procs[video_key] = None
+        self._num_video_frames[video_key] = len(self._video_readers[video_key])
+      else:
+        self._ff_procs[video_key] = None # will be created when the first frame is provided
+        self._video_readers[video_key] = None
+        self._num_video_frames[video_key] = 0
+  
+  # Define unique colors for each segmentation instance.
+  def _update_segmentation_colors(self):
+    num_colors = 15 # min(15, self.get_num_whales())
+    if len(self._segmentations_colors) < num_colors:
+      self._segmentations_colors = distinctipy.get_colors(num_colors, exclude_colors=[(0, 0, 1)], rng=6)
+      self._segmentations_colors = [np.array(distinctipy.get_rgb256(c), dtype=np.uint8) for c in self._segmentations_colors]
+  
+  ###############################
+  # File operations
+  ###############################
+  
+  # Make a copy of the data and optionally return a Segmentations pointer to it.
+  def copy(self, new_h5_filepath, include_masks=True, open_segmentations_object=True, new_segmentations_object_writable=False, overwrite_destination_hdf5_file_if_exists=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if os.path.exists(new_h5_filepath):
+      if overwrite_destination_hdf5_file_if_exists:
+        os.remove(new_h5_filepath)
+      else:
+        raise AssertionError('The target HDF5 filepath already exists: [%s]' % new_h5_filepath)
+      
+    # Create the new HDF5 file.
+    new_h5_file = h5py.File(new_h5_filepath, 'w')
+    
+    # Copy each dataset to the new file.
+    for (dataset_name, dataset) in self._h5_file.items():
+      if dataset_name == 'masks' and not include_masks:
+        continue
+      self._h5_file.copy(dataset, new_h5_file,
+                         name=None, shallow=False,
+                         expand_soft=True, expand_external=True, expand_refs=True,
+                         without_attrs=False)
+    
+    # Close the HDF5 file.
+    new_h5_file.close()
+    
+    # Open a Segmentations object for it if desired.
+    if open_segmentations_object:
+      segmentations_kwargs = {
+        'h5_filepath': new_h5_filepath,
+        'writable': new_segmentations_object_writable,
+        'frame_shape': self.get_frame_shape(),
+        'video_filepaths': self._video_filepaths,
+        'num_video_frames_to_save_as_images': self._num_video_frames_to_save_as_images,
+        'output_video_fps': self._output_video_fps,
+        'video_compression': self._video_compression,
+        'video_preset': self._video_preset,
+      }
+      new_segmentations = Segmentations(**segmentations_kwargs)
+      return new_segmentations
+    return None
+  
+  ###################################
+  # Frame sizes, counts, and mappings
+  ###################################
+  
+  # Get a list of whether segmentations were computed for a frame or for all frames.
+  def get_frames_are_segmented(self, frame_index=None):
+    if self._h5_file is None:
+      return None
+    if frame_index is None:
+      return np.array(self._h5_file['frames_are_segmented'])
+    return self._h5_file['frames_are_segmented'][frame_index] == 1
+  
+  # Get the total number of frames.
+  def get_num_frames_total(self):
+    # Use the HDF5 file if available.
+    if self._h5_file is not None:
+      return self._h5_file['frames_are_segmented'].shape[0]
+    # There was no data to determine the number of frames.
+    return None
+  
+  # Get the number of frames with segmentations computed.
+  def get_num_frames_segmented(self):
+    if self._h5_file is not None:
+      return np.sum(self._h5_file['frames_are_segmented'])
+    # There was no data to determine the number of frames with segmentations.
+    return None
+  
+  # Get the last frame index for which a segmentation was added.
+  def get_max_frame_index_segmented(self):
+    if self._h5_file is not None:
+      segmented_frame_indexes = np.where(self._h5_file['frames_are_segmented'])[0]
+      if segmented_frame_indexes.size > 0:
+        return np.max(segmented_frame_indexes)
+      return None
+    # There was no data to determine the number of frames with segmentations.
+    return None
+  
+  # Get the shape of a single frame/mask.
+  def get_frame_shape(self):
+    if self.have_masks():
+      return self._frame_shape
+    return None
+  
+  # Get a matrix entry index with a segmentation close to the desired frame index, within an optional tolerance.
+  def get_closest_frame_index_with_segmentation(self, frame_index, distance_threshold=0):
+    frames_are_segmented = self.get_frames_are_segmented()
+    if frames_are_segmented is None:
+      return None
+    frame_indexes_with_segmentations = np.where(frames_are_segmented)[0]
+    if frames_are_segmented.shape[0] == 1:
+      # If there is only one entry, consider that the best one.
+      best_index = 0
+    else:
+      # Find the index where the target frame index would be inserted without changing the sort order.
+      # This is much faster than using something like numpy.where(), since it can assume the input is sorted.
+      next_index_pastTarget = np.searchsorted(frame_indexes_with_segmentations, frame_index)
+      # If it returned the length of the array, decrement it to make it a valid index.
+      if next_index_pastTarget == frame_indexes_with_segmentations.shape[0]:
+        next_index_pastTarget -= 1
+      # If it returned the first element, use that as the best index.
+      if next_index_pastTarget == 0:
+        best_index = 0
+      else:
+        # We have placed the target between two entry indexes.
+        # Now see which one of those two is closer to the target.
+        index_candidates = np.array([next_index_pastTarget-1, next_index_pastTarget])
+        candidate_distances = np.abs(frame_indexes_with_segmentations[index_candidates] - frame_index)
+        if candidate_distances[0] < candidate_distances[1]:
+          best_index = index_candidates[0]
+        else:
+          best_index = index_candidates[1]
+    # Check if the closest index is within the threshold region of the target.
+    distance = np.abs(frame_indexes_with_segmentations[best_index] - frame_index)
+    if distance < distance_threshold:
+      # We found a good index!
+      return frame_indexes_with_segmentations[best_index]
+    # No entry was found to be close enough.
+    return None
+    
+  ###################################
+  # Whale indexes and IDs
+  ###################################
+  
+  # Get whether a segmentation was found for each whale in each frame.
+  def get_whale_segmentations_exist(self):
+    if self._h5_file is None:
+      return None
+    return np.array(self._h5_file['whale_segmentations_exist'])
+  
+  # Check whether a whale segmentation exists for a particular whale in a frame or all frames.
+  def whale_segmentation_exists(self, whale_index, frame_indexes=None):
+    whale_segmentations_exist = self.get_whale_segmentations_exist()
+    if whale_segmentations_exist is None:
+      return None
+    if frame_indexes is None:
+      return np.squeeze(whale_segmentations_exist[:, whale_index])
+    return np.squeeze(whale_segmentations_exist[frame_indexes, whale_index])
+  
+  # Recompute whether whale segmentations exist in each frame,
+  #  based on the centroids, boxes, and orientations.
+  # Note that it will not consider masks, since that would be quite slow.
+  def _recompute_whale_segmentations_exist(self):
+    centroids_xy = self.get_all_centroids_xy()
+    orientations_rad_confidence = self.get_all_orientations_rad_confidence()
+    bounding_boxes_4xy = dict([(box_key, self.get_all_bounding_boxes_4xy(box_key)) for box_key in self.get_bounding_box_keys()])
+    for whale_index in range(self.get_num_whales()):
+      frames_with_whale = []
+      frames_with_whale.append(np.all(~np.isnan(centroids_xy[:, whale_index, :]), axis=1))
+      frames_with_whale.append(np.all(~np.isnan(orientations_rad_confidence[:, whale_index, :]), axis=1))
+      for box_key in bounding_boxes_4xy:
+        frames_with_whale.append(np.all(~np.isnan(bounding_boxes_4xy[box_key][:, whale_index, :]), axis=1))
+      frames_with_whale = np.all(np.stack(frames_with_whale, axis=1), axis=1)
+      self._datasets['whale_segmentations_exist'][:, whale_index] = frames_with_whale
+      
+  # Get the whale ID mapping.
+  def get_whale_ids(self):
+    if self._h5_file is not None:
+      return [whale_id[0].decode('utf-8') for whale_id in self._datasets['whale_ids']]
+    return None
+  
+  # Get the whale ID for a specific whale index.
+  def get_whale_id(self, whale_index):
+    whale_ids = self.get_whale_ids()
+    if whale_ids is not None:
+      return whale_ids[whale_index]
+    return None
+  
+  # Assign a whale ID to a whale index.
+  def set_whale_id(self, whale_index, whale_id):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    self._h5_file['whale_ids'][whale_index] = str(whale_id)
+    
+  # Get the number of whales used.
+  def get_num_whales(self):
+    if self._h5_file is not None:
+      return self._h5_file['whale_ids'].shape[0]
+    return None
+  
+  # Get the number of frames each whale is present.
+  # Will return a numpy array where the list index is the whale index.
+  def get_whale_frame_counts(self):
+    whale_segmentations_exist = self.get_whale_segmentations_exist()
+    if whale_segmentations_exist is None:
+      return None
+    return np.sum(whale_segmentations_exist, axis=0).T
+  
+  # Get a whale index corresponding to the desired whale ID.
+  def get_whale_index_for_whale_id(self, whale_id):
+    whale_ids = self.get_whale_ids()
+    if whale_ids is None:
+      return None
+    try:
+      return whale_ids.index(whale_id)
+    except ValueError:
+      return None
+  
+  ###############################
+  # Dataset management helpers
+  ###############################
+  
+  def _expand_datasets(self, frame_index, whale_index):
+    for (dataset_name, dataset) in self._datasets.items():
+      # Specify which dimension is used for frames and whales.
+      # Most datasets have frame as dimension 0 and whales as dimension 1, but there are a few exceptions.
+      frame_dimension = 0
+      whale_dimension = 1
+      if dataset_name == 'whale_ids':
+        frame_dimension = None
+        whale_dimension = 0
+      if dataset_name == 'frames_are_segmented':
+        whale_dimension = None
+      # Expand the dataset along the frame dimension if needed.
+      if frame_dimension is not None:
+        if dataset.shape[frame_dimension] < (frame_index+1):
+          new_shape = list(dataset.shape)
+          new_shape[frame_dimension] = (frame_index+1) + self._dataset_expansion_size_frameDimension
+          dataset.resize(new_shape)
+      # Expand the dataset along the whale dimension if needed.
+      if whale_dimension is not None:
+        if dataset.shape[whale_dimension] < (whale_index+1):
+          new_shape = list(dataset.shape)
+          new_shape[whale_dimension] = (whale_index+1) + self._dataset_expansion_size_whaleDimension
+          dataset.resize(new_shape)
+    
+  ###############################
+  # Masks
+  ###############################
+  
+  # Check if masks are present in the HDF5 file.
+  def have_masks(self):
+    return 'masks' in self._datasets
+  
+  # Remove all masks from the data.
+  def remove_masks_dataset(self):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    # Delete the masks dataset if it exists.
+    # Note that using "del" will delete the name but not reclaim space,
+    #  so instead will copy all except the masks to a temporary HDF5 file.
+    if self.have_masks():
+      # Copy the file to a temporary file, excluding masks.
+      h5_filepath_temp = '%s_TEMP' % self._h5_filepath
+      self.copy(h5_filepath_temp, include_masks=False, open_segmentations_object=False, overwrite_destination_hdf5_file_if_exists=True)
+      # Remove the original file, and rename the new one to its original name.
+      self._h5_file.close()
+      os.remove(self._h5_filepath)
+      os.rename(h5_filepath_temp, self._h5_filepath)
+      # Update internal state.
+      del self._datasets['masks']
+      self._h5_file = h5py.File(self._h5_filepath, 'a' if self._writable else 'r')
+      self._frame_shape = None
+      for dataset_key in self._datasets.keys():
+        self._datasets[dataset_key] = self._h5_file[dataset_key]
+  
+  # Add a mask for the desired frame index.
+  def add_mask(self, frame_index, whale_index, mask_matrix):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    if not self.have_masks():
+      raise AssertionError('The provided HDF5 file does not have masks.')
+    # Expand datasets if needed.
+    self._expand_datasets(frame_index, whale_index)
+    # Fetch the masks dataset.
+    dataset = self._datasets['masks']
+    # Write the new entry.
+    dataset[frame_index, whale_index, :, :] = np.array(mask_matrix)
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_index] = 1
+    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(mask_matrix)
+    self._num_frames = max(self._num_frames, frame_index+1)
+    
+  # Get a mask for a desired frame and whale.
+  def get_mask(self, frame_index, whale_index):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self.have_masks():
+      raise AssertionError('The provided HDF5 file does not have masks.')
+    # Check if the whale segmentation exists for this frame.
+    if not self.whale_segmentation_exists(whale_index=whale_index, frame_indexes=frame_index):
+      return None
+    # Load the array into memory and return it.
+    return np.array(self._datasets['masks'][frame_index, whale_index, :, :])
+  
+  # Get all masks for a desired frame.
+  # If as_dict is True, will return a dictionary mapping whale index to mask.
+  #   Each mask is HxW, matching the frame resolution.
+  #   Values will be None if there was no segmentation for that whale index.
+  # Otherwise, will return an IxHxW matrix of the masks at this frame.
+  def get_masks(self, frame_index, as_dict=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self.have_masks():
+      raise AssertionError('The provided HDF5 file does not have masks.')
+    # Check if segmentations were actually created for this frame.
+    if not self.get_frames_are_segmented(frame_index):
+      return None
+    # Fetch the masks for this frame.
+    if as_dict:
+      masks = OrderedDict()
+      for whale_index in range(self.get_num_whales()):
+        masks[whale_index] = self.get_mask(frame_index=frame_index, whale_index=whale_index)
+    else:
+      dataset = self._datasets['masks']
+      if frame_index < 0 or frame_index >= dataset.shape[0]:
+        return None
+      # Load the array into memory and return it.
+      masks = np.squeeze(dataset[frame_index, :, :, :])
+    return masks
+  
+  # Get masks for all frames and whales.
+  # Will return an NxIxHxW matrix, where N is the number of frames, I is the number of whales, and HxW is the video resolution.
+  # Will return the HDF5 dataset (data on disk), since the whole matrix likely cannot fit in memory.
+  def get_all_masks(self):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self.have_masks():
+      raise AssertionError('The provided HDF5 file does not have masks.')
+    # Will not cast it to an array / copy it / squeeze it, since we do not want
+    #  to force it to load into memory - it would be too large.
+    return self._datasets['masks']
+  
+  # Set the masks for a desired whale in the desired frames.
+  def set_masks(self, frame_indexes, whale_index, masks):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self.have_masks():
+      raise AssertionError('The provided HDF5 file does not have masks.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Get a pointer to the current dataset.
+    dataset = self._datasets['masks']
+    # Verify the new shape and type.
+    if masks.shape[0] != len(frame_indexes):
+      raise AssertionError('The new mask matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
+    if (masks.shape[2] != dataset.shape[2]) or (masks.shape[3] != dataset.shape[3]):
+      raise AssertionError('The new mask matrix has frame shape %s, but the current frame shape is %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
+    if masks.dtype != dataset.dtype:
+      raise AssertionError('The new mask matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+    # Assign the new masks.
+    dataset[frame_indexes, whale_index, :, :] = masks
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_indexes] = 1
+    for (mask_index, frame_index) in enumerate(frame_indexes):
+      self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(masks[mask_index, :, :])
+  
+  
+  ###############################
+  # Bounding boxes
+  ###############################
+  
+  # Get the available types of bounding boxes.
+  def get_bounding_box_keys(self):
+    return self._bounding_box_keys
+  
+  # Add a bounding box for the desired frame and whale index.
+  # bounding_box_4xy is 8 numbers: xy of each box corner in order base, leftUpper, top, rightUpper
+  def add_bounding_box(self, bounding_box_key, frame_index, whale_index, bounding_box_4xy):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Expand datasets if needed.
+    self._expand_datasets(frame_index, whale_index)
+    # Get the dataset pointer.
+    dataset_name = self._bounding_box_key_to_name(bounding_box_key)
+    dataset = self._datasets[dataset_name]
+    # Write the new entry, if it is not a dummy entry.
+    if np.any(bounding_box_4xy > 0):
+      dataset[frame_index, whale_index, :] = np.array(bounding_box_4xy)
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_index] = 1
+    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(bounding_box_4xy > 0)
+    self._num_frames = max(self._num_frames, frame_index+1)
+  
+  # Get a bounding box for a desired frame and whale index.
+  # bounding_boxes_4xy is 8 numbers: xy for each box corner
+  # Will return None if there were no segmentations computed for the frame.
+  # Will be all nan if there was no bounding box for this whale in this frame.
+  def get_bounding_box_4xy(self, bounding_box_key, frame_index, whale_index):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if whale_index >= self.get_num_whales():
+      raise AssertionError('The specified whale index of %d is greater than the maximum of %d' % (whale_index, self.get_num_whales()-1))
+    # Check whether the whale should exist in this frame.
+    if not self.whale_segmentation_exists(whale_index, frame_index):
+      return None
+    # Fetch the dataset pointer.
+    dataset_name = self._bounding_box_key_to_name(bounding_box_key)
+    dataset = self._datasets[dataset_name]
+    if frame_index < 0 or frame_index >= dataset.shape[0]:
+      return None
+    # Squeeze the matrix, which will also force the matrix to be loaded into memory.
+    # To continue using it from the disk instead, just return the slice directly.
+    bounding_boxes_4xy = np.squeeze(dataset[frame_index, whale_index, :])
+    return bounding_boxes_4xy
+  
+  # Get all bounding boxes for a desired frame.
+  # Will return None if no segmentations were computed for this frame.
+  # If as_dict is True, will return a dictionary mapping whale index to bounding box.
+  #   Each bounding box is 8 numbers: xy for each box corner
+  #   Values will be nan if this whale was not found in this frame.
+  # Otherwise, will return an Ix8 matrix where I is the max number of whales.
+  #   result[whale, :] will be all nan if there was no bounding box for that frame index and whale index.
+  def get_bounding_boxes_4xy(self, bounding_box_key, frame_index, as_dict=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    # Check if segmentations were actually created for this frame.
+    if not self.get_frames_are_segmented(frame_index):
+      return None
+    # Fetch the bounding boxes for this frame.
+    if as_dict:
+      bounding_boxes_4xy = OrderedDict()
+      for whale_index in range(self.get_num_whales()):
+        bounding_boxes_4xy[whale_index] = self.get_bounding_box_4xy(bounding_box_key=bounding_box_key, frame_index=frame_index, whale_index=whale_index)
+    else:
+      dataset_name = self._bounding_box_key_to_name(bounding_box_key)
+      dataset = self._datasets[dataset_name]
+      if frame_index < 0 or frame_index >= dataset.shape[0]:
+        return None
+      # Squeeze the matrix, which will also force the matrix to be loaded into memory.
+      # To continue using it from the disk instead, just return the slice directly.
+      bounding_boxes_4xy = np.squeeze(dataset[frame_index, :, :])
+    return bounding_boxes_4xy
+  
+  # Get all bounding boxes, and optionally apply a smoothing filter.
+  # Will return an NxIx8 matrix, where N is the number of frames and I is the max whale index.
+  # result[frame, whale, :] will be all nan if there was no bounding box for that frame index and whale index.
+  # If smoothing is desired:
+  #   Can optionally affect the current HDF5 file.
+  #   The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  def get_all_bounding_boxes_4xy(self, bounding_box_key, apply_smoothing_filter=False,
+                                       smoothing_window_size_preCenter=20, smoothing_window_size_postCenter=20,
+                                       whale_indexes_toSmooth='all',
+                                       smoothing_edits_hdf5_data=False,
+                                       smoothed_whale_indexes_toPlot=None, smoothed_whale_indexes_toAnimate=None,
+                                       print_smoothing_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not apply_smoothing_filter:
+      # Load the array into memory and return it.
+      dataset_name = self._bounding_box_key_to_name(bounding_box_key)
+      return np.array(self._datasets[dataset_name])
+    else:
+      return self.smooth_bounding_boxes(bounding_box_key=bounding_box_key,
+                                        window_size_preCenter=smoothing_window_size_preCenter,
+                                        window_size_postCenter=smoothing_window_size_postCenter,
+                                        whale_indexes_toSmooth=whale_indexes_toSmooth,
+                                        edit_hdf5_data=smoothing_edits_hdf5_data,
+                                        whale_indexes_toPlot=smoothed_whale_indexes_toPlot,
+                                        whale_indexes_toAnimate=smoothed_whale_indexes_toAnimate,
+                                        print_status=print_smoothing_status)
+  
+  # Set the bounding boxes for a desired whale in the desired frames.
+  # Entries without real bounding boxes should use nan.
+  def set_bounding_boxes_4xy(self, bounding_box_key, frame_indexes, whale_index, bounding_boxes_4xy):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Get a pointer to the current dataset.
+    dataset_name = self._bounding_box_key_to_name(bounding_box_key)
+    dataset = self._datasets[dataset_name]
+    # Verify the new shape and type.
+    if bounding_boxes_4xy.shape[0] != len(frame_indexes):
+      raise AssertionError('The new box matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
+    if (bounding_boxes_4xy.shape[2] != dataset.shape[2]) or (bounding_boxes_4xy.shape[3] != dataset.shape[3]):
+      raise AssertionError('The new box matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
+    if bounding_boxes_4xy.dtype != dataset.dtype:
+      raise AssertionError('The new box matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+    # Assign the new bounding boxes.
+    dataset[frame_indexes, whale_index, :] = bounding_boxes_4xy
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_indexes] = 1
+    for (box_index, frame_index) in enumerate(frame_indexes):
+      self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(bounding_boxes_4xy[box_index, :] > 0)
+  
+  
+  ###############################
+  # Centroids
+  ###############################
+  
+  # Add a centroid of the mask for the desired frame and whale index.
+  # centroid_yx is 2 numbers: (y, x)
+  #  This can be the direct output of props.centroid if using skimage.measure.regionprops
+  def add_centroid(self, frame_index, whale_index, centroid_yx):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Expand datasets if needed.
+    self._expand_datasets(frame_index, whale_index)
+    # Fetch the dataset pointer.
+    dataset = self._datasets['centroids_xy']
+    # Write the new entry, if it is not a dummy entry.
+    if np.any(centroid_yx > 0):
+      dataset[frame_index, whale_index, :] = np.array(centroid_yx)[[1,0]]
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_index] = 1
+    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(centroid_yx > 0)
+    self._num_frames = max(self._num_frames, frame_index+1)
+  
+  # Get a centroid for a desired frame and whale index.
+  # Will return None if there were no segmentations computed for this frame.
+  # Entries will be nan if there was no centroid found for this whale in this frame.
+  def get_centroid_xy(self, frame_index, whale_index):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if whale_index >= self.get_num_whales():
+      raise AssertionError('The specified whale index of %d is greater than the maximum of %d' % (whale_index, self.get_num_whales()-1))
+    # Check whether the whale should exist in this frame.
+    if not self.whale_segmentation_exists(whale_index, frame_index):
+      return None
+    # Fetch the dataset pointer.
+    dataset = self._datasets['centroids_xy']
+    if frame_index < 0 or frame_index >= dataset.shape[0]:
+      return None
+    # Squeeze the matrix, which will also force the matrix to be loaded into memory.
+    # To continue using it from the disk instead, just return the slice directly.
+    centroid_xy = np.squeeze(dataset[frame_index, whale_index, :])
+    return centroid_xy
+  
+  # Get all centroids for a desired frame.
+  # Will return None if no segmentations were computed for this frame.
+  # If as_dict is True, will return a dictionary mapping whale index to centroid.
+  #   Values will be nan if this whale was not found in this frame.
+  # Otherwise, will return an Ix2 matrix where I is the max number of whales.
+  #  result[whale, :] will be all nan if there was no segmentation for that whale index.
+  def get_centroids_xy(self, frame_index, as_dict=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    # Check if segmentations were actually created for this frame.
+    if not self.get_frames_are_segmented(frame_index):
+      return None
+    # Fetch the centroids for this frame.
+    if as_dict:
+      centroids_xy = OrderedDict()
+      for whale_index in range(self.get_num_whales()):
+        centroids_xy[whale_index] = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+    else:
+      dataset = self._datasets['centroids_xy']
+      if frame_index < 0 or frame_index >= dataset.shape[0]:
+        return None
+      # Squeeze the matrix, which will also force the matrix to be loaded into memory.
+      # To continue using it from the disk instead, just return the slice directly.
+      centroids_xy = np.squeeze(dataset[frame_index, :, :])
+    return centroids_xy
+  
+  # Get all centroids, optionally with a smoothing filter applied.
+  # Will return an NxIx2 matrix, where N is the number of frames and I is the max whale index.
+  # Each centroid is (x,y)
+  # result[frame, whale, :] will be all nan if there was no segmentation for that whale index.
+  # If smoothing is desired:
+  #   Can optionally affect the current HDF5 file.
+  #   The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  def get_all_centroids_xy(self, apply_smoothing_filter=False,
+                                 smoothing_window_size_preCenter=20, smoothing_window_size_postCenter=20,
+                                 whale_indexes_toSmooth='all',
+                                 smoothing_edits_hdf5_data=False,
+                                 smoothed_whale_indexes_toPlot=None,
+                                 print_smoothing_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not apply_smoothing_filter:
+      # Load the array into memory and return it.
+      return np.array(self._datasets['centroids_xy'])
+    else:
+      return self.smooth_centroids(window_size_preCenter=smoothing_window_size_preCenter,
+                                   window_size_postCenter=smoothing_window_size_postCenter,
+                                   whale_indexes_toSmooth=whale_indexes_toSmooth,
+                                   edit_hdf5_data=smoothing_edits_hdf5_data,
+                                   whale_indexes_toPlot=smoothed_whale_indexes_toPlot,
+                                   print_status=print_smoothing_status)
+  
+  # Set the centroids for a desired whale in the desired frames.
+  # Entries without real centroids should use nan.
+  def set_centroids_xy(self, frame_indexes, whale_index, centroids_xy):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Get a pointer to the current dataset.
+    dataset = self._datasets['centroids_xy']
+    # Verify the new shape and type.
+    if centroids_xy.shape[0] != len(frame_indexes):
+      raise AssertionError('The new centroids matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
+    if (centroids_xy.shape[2] != dataset.shape[2]) or (centroids_xy.shape[3] != dataset.shape[3]):
+      raise AssertionError('The new centroids matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
+    if centroids_xy.dtype != dataset.dtype:
+      raise AssertionError('The new centroids matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+    # Assign the new bounding boxes.
+    dataset[frame_indexes, whale_index, :] = centroids_xy
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_indexes] = 1
+    for (centroid_index, frame_index) in enumerate(frame_indexes):
+      self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(centroids_xy[centroid_index, :] > 0)
+  
+  
+  ###############################
+  # Orientations
+  ###############################
+  
+  # Add an orientation angle of the mask for the desired frame and whale index.
+  def add_orientation(self, frame_index, whale_index, orientation_rad, orientation_confidence):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Expand datasets if needed.
+    self._expand_datasets(frame_index, whale_index)
+    # Fetch the datset pointer.
+    dataset = self._datasets['orientations_rad_confidence']
+    # Write the new entry.
+    dataset[frame_index, whale_index, :] = np.squeeze(np.array([orientation_rad, orientation_confidence]))
+    # Update metadata arrays.
+    # Will not update whale_segmentations_exist, since the orientation and confidence both being 0 might be valid.
+    self._datasets['frames_are_segmented'][frame_index] = 1
+    self._num_frames = max(self._num_frames, frame_index+1)
+  
+  # Get an orientation angle for a desired frame and whale index.
+  # Will return (orientation_rad, orientation_confidence)
+  # Will return (None, None) if no segmentations were computed for this frame.
+  # Values will be nan if this whale was not found in this frame.
+  def get_orientation_rad_confidence(self, frame_index, whale_index):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if whale_index >= self.get_num_whales():
+      raise AssertionError('The specified whale index of %d is greater than the maximum of %d' % (whale_index, self.get_num_whales()-1))
+    # Check whether the whale should exist in this frame.
+    if not self.whale_segmentation_exists(whale_index, frame_index):
+      return (None, None)
+    # Fetch the dataset pointer.
+    dataset = self._datasets['orientations_rad_confidence']
+    if frame_index < 0 or frame_index >= dataset.shape[0]:
+      return (None, None)
+    # Squeeze the matrix, which will also force the matrix to be loaded into memory.
+    # To continue using it from the disk instead, just return the slice directly.
+    (orientation_rad, orientation_confidence) = np.squeeze(dataset[frame_index, whale_index, :])
+    return (orientation_rad, orientation_confidence)
+  
+  # Get all orientations for a desired frame.
+  # Will return None if no segmentations were computed for this frame.
+  # If as_dict is True, will return a dictionary mapping whale index to (orientation_rad, orientation_confidence).
+  #   Values will be nan if there was no direction vector for that whale index.
+  # Otherwise, will return an Ix2 matrix where I is the max number of whakes,
+  #   result[whale, :] will be all nan if there was no vector found for that whale index.
+  def get_orientations_rad_confidence(self, frame_index, as_dict=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    # Check if segmentations were actually created for this frame.
+    if not self.get_frames_are_segmented(frame_index):
+      return None
+    # Fetch the orientation data for this frame.
+    if as_dict:
+      orientations_rad_confidence = OrderedDict()
+      for whale_index in range(self.get_num_whales()):
+        orientations_rad_confidence[whale_index] = self.get_orientation_rad_confidence(frame_index=frame_index, whale_index=whale_index)
+    else:
+      dataset = self._datasets['orientations_rad_confidence']
+      if frame_index < 0 or frame_index >= dataset.shape[0]:
+        return None
+      # Squeeze the matrix, which will also force the matrix to be loaded into memory.
+      # To continue using it from the disk instead, just return the slice directly.
+      orientations_rad_confidence = np.squeeze(dataset[frame_index, :, :])
+    return orientations_rad_confidence
+  
+  # Get all orientations, and optionally apply a smoothing filter.
+  # Will return an NxIx2 matrix, where N is the number of frames, I is the max whale index,
+  #   and 2 elements are (orientation_rad, orientation_confidence)
+  # result[frame, whale, :] will be all 0 if there was no segmentation for that frame index and whale index.
+  #  So if an entry is 0, also do get_centroid_xy for that entry; if that is None, then the orientation is a dummy.
+  # If smoothing is desired:
+  #   Can optionally affect the current HDF5 file.
+  #   The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  #   The window size must be odd; if an even window size is provided, it will be expanded by 1.
+  def get_all_orientations_rad_confidence(self, apply_smoothing_filter=False,
+                                                smoothing_window_size_preCenter=20, smoothing_window_size_postCenter=20,
+                                                whale_indexes_toSmooth='all',
+                                                smoothing_edits_hdf5_data=False,
+                                                smoothed_whale_indexes_toPlot=None,
+                                                print_smoothing_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not apply_smoothing_filter:
+      # Load the array into memory and return it.
+      return np.array(self._datasets['orientations_rad_confidence'])
+    else:
+      return self.smooth_orientations(window_size_preCenter=smoothing_window_size_preCenter,
+                                      window_size_postCenter=smoothing_window_size_postCenter,
+                                      whale_indexes_toSmooth=whale_indexes_toSmooth,
+                                      edit_hdf5_data=smoothing_edits_hdf5_data,
+                                      whale_indexes_toPlot=smoothed_whale_indexes_toPlot,
+                                      print_status=print_smoothing_status)
+  
+  # Set the orientations for a desired whale in the desired frames.
+  # Entries without real orientations should use nan.
+  def set_orientations_rad_confidence(self, frame_indexes, whale_index, orientations_rad_confidence):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Get a pointer to the current dataset.
+    dataset = self._datasets['orientations_rad_confidence']
+    # Verify the new shape and type.
+    if orientations_rad_confidence.shape[0] != len(frame_indexes):
+      raise AssertionError('The new orientations matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
+    if (orientations_rad_confidence.shape[2] != dataset.shape[2]) or (orientations_rad_confidence.shape[3] != dataset.shape[3]):
+      raise AssertionError('The new orientations matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
+    if centroids_xy.dtype != dataset.dtype:
+      raise AssertionError('The new orientations matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+    # Assign the new bounding boxes.
+    dataset[frame_indexes, whale_index, :] = orientations_rad_confidence
+    # Update metadata arrays.
+    self._datasets['frames_are_segmented'][frame_indexes] = 1
+    for (orientation_index, frame_index) in enumerate(frame_indexes):
+      self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.all(~np.isnan(orientations_rad_confidence[orientation_index, :]))
+  
+  
+  ###############################
+  # Edit segmentations
+  ###############################
+  
+  # Remove a segmentation for a whale index in the desired frames.
+  # Will update the masks, bounding boxes, centroids, and orientations.
+  def remove_segmentation(self, frame_indexes, whale_index, print_status=False):
+    if print_status: print('Removing segmentations for whale index %d from %d frames (min %d, max %d)' % (whale_index, len(frame_indexes), min(frame_indexes), max(frame_indexes)))
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    # Remove from masks.
+    if self.have_masks():
+      if print_status: print(' Updating masks; this may take some time and memory if many frames are selected')
+      # Determine the span of pixels for this whale.
+      bounding_boxes_forWhale = self._datasets[self._bounding_box_key_to_name('full')][frame_indexes, whale_index, :]
+      bounding_boxes_forWhale = bounding_boxes_forWhale.reshape((-1, 4, 2))
+      x_min = np.nanmin(bounding_boxes_forWhale[:, :, 0])
+      x_max = np.nanmax(bounding_boxes_forWhale[:, :, 0])
+      y_min = np.nanmin(bounding_boxes_forWhale[:, :, 1])
+      y_max = np.nanmax(bounding_boxes_forWhale[:, :, 1])
+      # Set these pixels to 0 in the masks.
+      self._datasets['masks'][frame_indexes, whale_index, y_min:y_max, x_min:x_max] = 0
+    # Remove from bounding boxes.
+    if print_status: print(' Updating bounding boxes')
+    for box_key in self._bounding_box_keys:
+      self._datasets[self._bounding_box_key_to_name(box_key)][frame_indexes, whale_index, :] = np.nan
+    # Remove from centroids.
+    if print_status: print(' Updating centroids')
+    self._datasets['centroids_xy'][frame_indexes, whale_index, :] = np.nan
+    # Remove from orientations.
+    if print_status: print(' Updating orientations')
+    self._datasets['orientations_rad_confidence'][frame_indexes, whale_index, :] = np.nan
+    # Update metadata arrays.
+    self._datasets['whale_segmentations_exist'][frame_indexes, whale_index] = 0
+  
+  # Remove a whale index entirely.
+  def remove_whale_indexes(self, whale_indexes_toRemove, print_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    if isinstance(whale_indexes_toRemove, int):
+      whale_indexes_toRemove = [whale_indexes_toRemove]
+    whale_indexes_toRemove = list(whale_indexes_toRemove)
+    
+    if print_status: print('Removing the following whale indexes: %s' % whale_indexes_toRemove)
+    
+    # If only one is being removed, swap it to the end then resize to remove the end.
+    # This will be much faster for the masks.
+    if len(whale_indexes_toRemove) == 1:
+      whale_index_toRemove = whale_indexes_toRemove[0]
+      self.swap_whale_indexes(whale_index_toRemove, self.get_num_whales()-1,
+                              0, self.get_num_frames_total()-1,
+                              swap_whale_ids=True)
+      whale_indexes_toRemove = [self.get_num_whales()-1]
+    
+    # Determine a permutation of the current whale indexes that puts the ones to remove at the end.
+    # And determine the whale indexes to keep.
+    num_whales_original = self.get_num_whales()
+    whale_indexes_original = list(range(num_whales_original))
+    whale_indexes_toKeep = [whale_index for whale_index in whale_indexes_original if whale_index not in whale_indexes_toRemove]
+    permuted_whale_indexes = np.array(whale_indexes_toKeep + whale_indexes_toRemove)
+    num_whales_toKeep = len(whale_indexes_toKeep)
+    need_to_permute = not np.array_equal(permuted_whale_indexes, np.arange(0, num_whales_original))
+    
+    # Update masks.
+    # The entire matrix is too large to load, so load it in batches.
+    #  In each batch, put the indexes to remove at the end.
+    # If the indexes to remove happen to already be the trailing indexes,
+    #  then can skip the slow matrix swapping.
+    if self.have_masks():
+      dataset = self._datasets['masks']
+      if need_to_permute:
+        max_gb_to_allocate = 5
+        gb_per_frame_per_whale = 0.0033 # estimate from some previous error printouts
+        num_frames_to_load = round(max_gb_to_allocate/(gb_per_frame_per_whale*num_whales_original))
+        start_frame_index = 0
+        while start_frame_index < self.get_num_frames_total():
+          end_frame_index = min(self.get_num_frames_total()-1, start_frame_index+num_frames_to_load-1)
+          if print_status: print('  Updating masks for frame indexes [%d, %d] out of %d' % (start_frame_index, end_frame_index, self.get_num_frames_total()))
+          masks_permuted = np.zeros((end_frame_index-start_frame_index+1, *dataset.shape[1:]), dtype=dataset.dtype)
+          dataset.read_direct(masks_permuted, np.s_[start_frame_index:end_frame_index+1, :, :, :])
+          masks_permuted = masks_permuted[:, permuted_whale_indexes, :, :]
+          masks_permuted = np.ascontiguousarray(masks_permuted)
+          dataset.write_direct(masks_permuted, None, np.s_[start_frame_index:end_frame_index+1, :, :, :])
+          start_frame_index = end_frame_index+1
+      # Now remove the ones at the end by resizing the dataset.
+      if print_status: print('  Resizing the mask matrix to trim the removed whales')
+      matrix_shape = list(dataset.shape)
+      matrix_shape[1] = num_whales_toKeep
+      dataset.resize(matrix_shape)
+    
+    # Update centroids.
+    # This can be done entirely in memory.
+    if print_status: print('  Updating centroids')
+    dataset = self._datasets['centroids_xy']
+    if need_to_permute:
+      dataset[:, 0:num_whales_toKeep, :] = dataset[:, whale_indexes_toKeep, :]
+    matrix_shape = list(dataset.shape)
+    matrix_shape[1] = num_whales_toKeep
+    dataset.resize(matrix_shape)
+    
+    # Update bounding boxes.
+    # This can be done entirely in memory.
+    if print_status: print('  Updating bounding boxes')
+    for bounding_box_key in self.get_bounding_box_keys():
+      dataset_name = self._bounding_box_key_to_name(bounding_box_key)
+      dataset = self._datasets[dataset_name]
+      if need_to_permute:
+        dataset[:, 0:num_whales_toKeep, :] = dataset[:, whale_indexes_toKeep, :]
+      matrix_shape = list(dataset.shape)
+      matrix_shape[1] = num_whales_toKeep
+      dataset.resize(matrix_shape)
+      
+    # Update orientations.
+    # This can be done entirely in memory.
+    if print_status: print('  Updating orientations')
+    dataset = self._datasets['orientations_rad_confidence']
+    if need_to_permute:
+      dataset[:, 0:num_whales_toKeep, :] = dataset[:, whale_indexes_toKeep, :]
+    matrix_shape = list(dataset.shape)
+    matrix_shape[1] = num_whales_toKeep
+    dataset.resize(matrix_shape)
+    
+    # Update which frames have which whales.
+    dataset = self._datasets['whale_segmentations_exist']
+    if need_to_permute:
+      dataset[:, 0:num_whales_toKeep] = dataset[:, whale_indexes_toKeep]
+    matrix_shape = list(dataset.shape)
+    matrix_shape[1] = num_whales_toKeep
+    dataset.resize(matrix_shape)
+    
+    # Update the whale IDs.
+    dataset = self._datasets['whale_ids']
+    if need_to_permute:
+      dataset[0:num_whales_toKeep] = dataset[whale_indexes_toKeep]
+    matrix_shape = list(dataset.shape)
+    matrix_shape[0] = num_whales_toKeep
+    dataset.resize(matrix_shape)
+  
+  # Swap two whale indexes in the desired frames.
+  # Optionally also swap the whale ID mapping for these indexes.
+  def swap_whale_indexes(self, whale_index_1, whale_index_2, frame_index_start, frame_index_end, swap_whale_ids=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    
+    # First swao the IDs, since they do not depend on the frames.
+    if swap_whale_ids:
+      dataset = self._datasets['whale_ids']
+      data_1 = dataset[whale_index_1]
+      dataset[whale_index_1] = dataset[whale_index_2]
+      dataset[whale_index_2] = data_1
+      
+    # Determine the region of frames within the requested window where either whale actually exists.
+    # Outside of that window, no data needs to be copied since all are already np.nan (or 0 for masks).
+    whale_1_exists = self.whale_segmentation_exists(whale_index_1)[frame_index_start:frame_index_end+1]
+    whale_2_exists = self.whale_segmentation_exists(whale_index_2)[frame_index_start:frame_index_end+1]
+    either_whale_exists = whale_1_exists | whale_2_exists
+    either_whale_exists_indexes = np.where(either_whale_exists)[0]
+    # If neither whale ever exists, no swapping is needed.
+    if either_whale_exists_indexes.size == 0:
+      return
+    frame_index_end = frame_index_start + either_whale_exists_indexes[-1]
+    frame_index_start = frame_index_start + either_whale_exists_indexes[0]
+    print(' frame bounds [%d %d]' % (frame_index_start, frame_index_end), end='')
+    # whale_1_exists = self.whale_segmentation_exists(whale_index_1)
+    # whale_2_exists = self.whale_segmentation_exists(whale_index_2)
+    # either_whale_exists = whale_1_exists | whale_2_exists
+    # either_whale_exists_indexes = np.where(either_whale_exists)[0]
+    # # If neither whale ever exists, no swapping is needed.
+    # if either_whale_exists_indexes.size == 0:
+    #   return
+    # frame_indexes_to_swap = either_whale_exists_indexes[(either_whale_exists_indexes >= frame_index_start) & (either_whale_exists_indexes <= frame_index_end)]
+    # print(' swapping %d frames ' % frame_indexes_to_swap.size, end='')
+    
+    # Update masks.
+    # Assume that the matrix for a single whale over the frame range is small enough to load into memory.
+    if self.have_masks():
+      dataset = self._datasets['masks']
+      # Determine the span of the image that contains the whale, across all frames.
+      bounding_boxes = self.get_all_bounding_boxes_4xy(bounding_box_key='full')
+      bounding_boxes_forWhale_1 = bounding_boxes[:, whale_index_1, :].reshape((-1, 4, 2))
+      bounding_boxes_forWhale_2 = bounding_boxes[:, whale_index_2, :].reshape((-1, 4, 2))
+      with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
+        x_min = int(np.nanmin([np.nanmin(b[frame_index_start:frame_index_end+1, :, 0]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
+        x_max = int(np.nanmax([np.nanmax(b[frame_index_start:frame_index_end+1, :, 0]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
+        y_min = int(np.nanmin([np.nanmin(b[frame_index_start:frame_index_end+1, :, 1]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
+        y_max = int(np.nanmax([np.nanmax(b[frame_index_start:frame_index_end+1, :, 1]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
+      x_range = float(x_max - x_min)
+      y_range = float(y_max - y_min)
+      # print('    Will process %d pixels, from (%d, %d) to (%d, %d); a %0.1f reduction factor' % (x_range*y_range, x_min, y_min, x_max, y_max, float(np.prod(dataset.shape[2:]))/float(x_range*y_range)))
+      # Swap the data within the active frames and the active subregion.
+      masks_1 = dataset[frame_index_start:frame_index_end+1, whale_index_1, y_min:y_max+1, x_min:x_max+1]
+      dataset[frame_index_start:frame_index_end+1, whale_index_1, y_min:y_max+1, x_min:x_max+1] = dataset[frame_index_start:frame_index_end+1, whale_index_2, y_min:y_max+1, x_min:x_max+1]
+      dataset[frame_index_start:frame_index_end+1, whale_index_2, y_min:y_max+1, x_min:x_max+1] = masks_1
+      # masks_1 = dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :]
+      # dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :] = dataset[frame_index_start:frame_index_end+1, whale_index_2, :, :]
+      # dataset[frame_index_start:frame_index_end+1, whale_index_2, :, :] = masks_1
+    
+    # Update centroids, orientations, and bounding boxes.
+    dataset_names = ['centroids_xy', 'orientations_rad_confidence'] + [self._bounding_box_key_to_name(bounding_box_key) for bounding_box_key in self.get_bounding_box_keys()]
+    for dataset_name in dataset_names:
+      dataset = self._datasets[dataset_name]
+      data_1 = dataset[frame_index_start:frame_index_end+1, whale_index_1, :]
+      dataset[frame_index_start:frame_index_end+1, whale_index_1, :] = dataset[frame_index_start:frame_index_end+1, whale_index_2, :]
+      dataset[frame_index_start:frame_index_end+1, whale_index_2, :] = data_1
+    
+    # Update metadata arrays.
+    dataset = self._datasets['whale_segmentations_exist']
+    data_1 = dataset[frame_index_start:frame_index_end+1, whale_index_1]
+    dataset[frame_index_start:frame_index_end+1, whale_index_1] = dataset[frame_index_start:frame_index_end+1, whale_index_2]
+    dataset[frame_index_start:frame_index_end+1, whale_index_2] = data_1
+  
+  # Change a whale index to another index in the desired frames.
+  # Will clobber any existing segmentation data for the destination whale in those frames.
+  # Will mark the segmentation in the source whale index as no longer being present.
+  # If remove_whale_index_source is True, will also delete whale_index_source from the dataset.
+  def change_whale_index(self, whale_index_source, whale_index_destination,
+                               frame_index_start, frame_index_end):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    
+    # Determine the region of frames within the requested window where either whale actually exists.
+    # Outside of that window, no data needs to be copied since all are already np.nan (or 0 for masks).
+    whale_source_exists = self.whale_segmentation_exists(whale_index_source)[frame_index_start:frame_index_end+1]
+    whale_destination_exists = self.whale_segmentation_exists(whale_index_destination)[frame_index_start:frame_index_end+1]
+    either_whale_exists = whale_source_exists | whale_destination_exists
+    either_whale_exists_indexes = np.where(either_whale_exists)[0]
+    # If neither whale ever exists, no adjustments are needed.
+    if either_whale_exists_indexes.size == 0:
+      return
+    frame_index_end = frame_index_start + either_whale_exists_indexes[-1]
+    frame_index_start = frame_index_start + either_whale_exists_indexes[0]
+    
+    # Update masks.
+    # Assume that the matrix for a single whale over the frame range is small enough to load into memory.
+    if self.have_masks():
+      dataset = self._datasets['masks']
+      masks_source = dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :]
+      dataset[frame_index_start:frame_index_end+1, whale_index_destination, :, :] = dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :]
+      dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :] = 0
+    
+    # Update centroids, orientations, and bounding boxes.
+    dataset_names = ['centroids_xy', 'orientations_rad_confidence'] + [self._bounding_box_key_to_name(bounding_box_key) for bounding_box_key in self.get_bounding_box_keys()]
+    for dataset_name in dataset_names:
+      dataset = self._datasets[dataset_name]
+      dataset[frame_index_start:frame_index_end+1, whale_index_destination, :] = dataset[frame_index_start:frame_index_end+1, whale_index_source, :]
+      dataset[frame_index_start:frame_index_end+1, whale_index_source, :] = np.nan
+    
+    # Update metadata arrays.
+    dataset = self._datasets['whale_segmentations_exist']
+    dataset[frame_index_start:frame_index_end+1, whale_index_destination] = dataset[frame_index_start:frame_index_end+1, whale_index_source]
+    dataset[frame_index_start:frame_index_end+1, whale_index_source] = 0
+    # 'whale_ids' will remain the same
+    
+  # Create a new whale index for a desired whale in desired frames.
+  # Optionally also name the new whale index with a new ID.
+  def move_to_new_whale_index(self, whale_index_toMove, frame_index_start, frame_index_end, new_whale_id=''):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    
+    # Expand datasets for a new whale at the end.
+    new_whale_index = self.get_num_whales()
+    self._expand_datasets(0, new_whale_index)
+    
+    # Change the index.
+    self.change_whale_index(whale_index_toMove, new_whale_index,
+                            frame_index_start, frame_index_end+1)
+    
+    # Assign the new ID if provided.
+    self.set_whale_id(new_whale_index, new_whale_id)
+    
+  #################################
+  # Filter and smooth whales
+  #################################
+  
+  # Filter the instances to only keep whales that are found in at least a threshold number of frames.
+  # If create_new_hdf5_file is False, will edit a copy of this file instead of editing in place.
+  def filter_whale_instances_byCount(self, min_frame_count=150, remove_masks_dataset=False, create_new_hdf5_file=False, overwrite_destination_hdf5_file_if_exists=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not create_new_hdf5_file and not self._writable:
+      raise AssertionError('The Segmentations object must be created with the "writable" argument to filter instances in place')
+    
+    # Create a new HDF5 file for the filtered results if desired.
+    if create_new_hdf5_file:
+      h5_filepath_filtered = '%s_filtered%dframes.hdf5' % (os.path.splitext(self._h5_filepath)[0], min_frame_count)
+      segmentations_filtered = self.copy(h5_filepath_filtered, include_masks=True, open_segmentations_object=True, new_segmentations_object_writable=True, overwrite_destination_hdf5_file_if_exists=overwrite_destination_hdf5_file_if_exists)
+    # Otherwise, edit data in the current file.
+    else:
+      segmentations_filtered = self
+    
+    # Remove masks if desired.
+    if remove_masks_dataset:
+      segmentations_filtered.remove_masks_dataset()
+    
+    # Determine the whale indexes to remove.
+    whale_frame_counts = self.get_whale_frame_counts()
+    whale_indexes_toRemove = np.where(whale_frame_counts < min_frame_count)[0]
+    
+    # Remove the whales that did not meet the threshold.
+    segmentations_filtered.remove_whale_indexes(whale_indexes_toRemove)
+    
+    # Close the file if a new one was created.
+    if create_new_hdf5_file:
+      segmentations_filtered.close()
+      
+    # If a new file was created, close it to clean it up then return a pointer to it.
+    if create_new_hdf5_file:
+      segmentations_filtered.close()
+      segmentations_kwargs = {
+        'h5_filepath': h5_filepath_filtered,
+        'writable': self._writable,
+        'frame_shape': self.get_frame_shape(),
+        'video_filepaths': self._video_filepaths,
+        'num_video_frames_to_save_as_images': self._num_video_frames_to_save_as_images,
+        'output_video_fps': self._output_video_fps,
+        'video_compression': self._video_compression,
+        'video_preset': self._video_preset,
+      }
+      segmentations_filtered = Segmentations(**segmentations_kwargs)
+      return segmentations_filtered
+    # Otherwise, return nothing.
+    return None
+    
+  
+  # Return a version of the centroids that has been smoothed using a rolling filter.
+  # Can optionally edit the current HDF5 file.
+  # The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  def smooth_centroids(self, window_size_preCenter=20, window_size_postCenter=20,
+                             whale_indexes_toSmooth='all', edit_hdf5_data=False,
+                             whale_indexes_toPlot=None, print_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if edit_hdf5_data and not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    
+    # Initialize.
+    start_time_s = time.time()
+    centroids = np.array(self.get_all_centroids_xy()) # load the whole matrix into memory rather than editing the HDF5 file
+    if isinstance(whale_indexes_toSmooth, str) and whale_indexes_toSmooth.lower().strip() == 'all':
+      whale_indexes_toSmooth = None
+    if whale_indexes_toPlot is None:
+      whale_indexes_toPlot = []
+    elif isinstance(whale_indexes_toPlot, str) and whale_indexes_toPlot.lower().strip() == 'all':
+      whale_indexes_toPlot = list(range(centroids.shape[1]))
+    def print_ifDesired(args, kwargs=None):
+      if isinstance(args, str):
+        args = [args]
+      if print_status:
+        if kwargs is not None:
+          print(*args, **kwargs)
+        else:
+          print(*args)
+    
+    # Process each whale index.
+    print_ifDesired('Smoothing centroids with window size [%d, %d]' % (window_size_preCenter, window_size_postCenter))
+    for whale_index in range(centroids.shape[1]):
+      if whale_indexes_toSmooth is not None and whale_index not in whale_indexes_toSmooth:
+        continue
+      t0 = time.time()
+      print_ifDesired('  Filtering centroids for whale index %d... ' % whale_index, {'end':''})
+      centroids_forWhale = np.copy(centroids[:, whale_index, :])
+      centroids_forWhale[np.isnan(centroids_forWhale)] = -1
+      centroids_forWhale_filtered = scipy.ndimage.median_filter(centroids_forWhale,
+                                                                size=(window_size_preCenter+window_size_postCenter+1),
+                                                                mode='reflect',
+                                                                origin=0,
+                                                                axes=[0])
+      centroids_forWhale[centroids_forWhale == -1] = np.nan
+      centroids_forWhale_filtered[centroids_forWhale_filtered == -1] = np.nan
+      centroids_forWhale_filtered[np.any(np.isnan(centroids_forWhale_filtered), axis=1)] = np.nan
+      # Store the result in memory.
+      centroids[:, whale_index, :] = centroids_forWhale_filtered
+      print_ifDesired('completed in %0.2fs' % (time.time() - t0))
+      
+      # Plot if desired.
+      if whale_index in whale_indexes_toPlot:
+        fig, axs = plt.subplots(nrows=2, ncols=1,
+                                 squeeze=False, # if False, always return 2D array of axes
+                                 sharex=True, sharey=False,
+                                 subplot_kw={'frame_on': True},
+                                 figsize=(4,6),
+                                 )
+        plt.get_current_fig_manager().window.showMaximized()
+        axs[0][0].grid(True, color='lightgray')
+        axs[1][0].grid(True, color='lightgray')
+        axs[0][0].plot(centroids_forWhale[:,0])
+        axs[0][0].plot(centroids_forWhale_filtered[:,0])
+        axs[1][0].plot(centroids_forWhale[:,1])
+        axs[1][0].plot(centroids_forWhale_filtered[:,1])
+        axs[0][0].set_title('Centroid X')
+        axs[1][0].set_title('Centroid Y')
+        axs[1][0].set_xlabel('Frame Index')
+        axs[1][0].set_ylabel('Mask Coordinate')
+        axs[0][0].set_ylabel('Mask Coordinate')
+        plt.suptitle('Original and Smoothed Centroids for Whale Index %d' % whale_index)
+    
+    print_ifDesired('  Finished smoothing the centroids in %0.2fs' % (time.time() - start_time_s))
+    print_ifDesired('')
+    if len(whale_indexes_toPlot) > 0:
+      plt.show(block=True)
+    
+    # Update the HDF5 file if desired.
+    if edit_hdf5_data:
+      self._datasets['centroids_xy'][:,:,:] = centroids
+      # Recompute whether whales exist in each frame.
+      self._recompute_whale_segmentations_exist()
+      
+    return centroids
+  
+  # Return a version of the orientations that has been smoothed using a rolling filter.
+  # Can optionally affect the current HDF5 file.
+  # The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  # The window size must be odd; if an even window size is provided, it will be expanded by 1.
+  def smooth_orientations(self, window_size_preCenter=20, window_size_postCenter=20,
+                          whale_indexes_toSmooth='all', edit_hdf5_data=False,
+                          whale_indexes_toPlot=None, print_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if edit_hdf5_data and not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    
+    # Initialize.
+    start_time_s = time.time()
+    orientations_rad_confidence = np.array(self.get_all_orientations_rad_confidence()) # load the whole matrix into memory rather than editing the HDF5 file
+    if (window_size_preCenter+window_size_postCenter+1) % 2 == 0:
+      window_size_preCenter += 1
+    if isinstance(whale_indexes_toSmooth, str) and whale_indexes_toSmooth.lower().strip() == 'all':
+      whale_indexes_toSmooth = None
+    if whale_indexes_toPlot is None:
+      whale_indexes_toPlot = []
+    elif isinstance(whale_indexes_toPlot, str) and whale_indexes_toPlot.lower().strip() == 'all':
+      whale_indexes_toPlot = list(range(orientations_rad_confidence.shape[1]))
+    def print_ifDesired(args, kwargs=None):
+      if isinstance(args, str):
+        args = [args]
+      if print_status:
+        if kwargs is not None:
+          print(*args, **kwargs)
+        else:
+          print(*args)
+    
+    # Process each whale index.
+    print_ifDesired('Smoothing orientations and confidences with window size [%d, %d]' % (window_size_preCenter, window_size_postCenter))
+    for whale_index in range(orientations_rad_confidence.shape[1]):
+      if whale_indexes_toSmooth is not None and whale_index not in whale_indexes_toSmooth:
+        continue
+      t0 = time.time()
+      print_ifDesired('  Filtering orientations and confidences for whale index %d... ' % whale_index, {'end':''})
+      orientations_rad_confidence_forWhale = np.copy(orientations_rad_confidence[:, whale_index, :])
+      orientations_rad_confidence_forWhale[np.isnan(orientations_rad_confidence_forWhale)] = -1
+      orientations_rad_confidence_forWhale_filtered = scipy.ndimage.median_filter(orientations_rad_confidence_forWhale,
+                                                                size=(window_size_preCenter+window_size_postCenter+1),
+                                                                mode='reflect',
+                                                                origin=0,
+                                                                axes=[0])
+      orientations_rad_confidence_forWhale[orientations_rad_confidence_forWhale == -1] = np.nan
+      orientations_rad_confidence_forWhale_filtered[orientations_rad_confidence_forWhale_filtered == -1] = np.nan
+      # Store the result in memory.
+      orientations_rad_confidence[:, whale_index, :] = orientations_rad_confidence_forWhale_filtered
+      print_ifDesired('completed in %0.2fs' % (time.time() - t0))
+      
+      # Plot if desired.
+      if whale_index in whale_indexes_toPlot:
+        fig, axs = plt.subplots(nrows=2, ncols=1,
+                                 squeeze=False, # if False, always return 2D array of axes
+                                 sharex=True, sharey=False,
+                                 subplot_kw={'frame_on': True},
+                                 figsize=(4,6),
+                                 )
+        plt.get_current_fig_manager().window.showMaximized()
+        axs[0][0].grid(True, color='lightgray')
+        axs[1][0].grid(True, color='lightgray')
+        axs[0][0].plot(np.degrees(orientations_rad_confidence_forWhale[:,0]))
+        axs[0][0].plot(np.degrees(orientations_rad_confidence_forWhale_filtered[:,0]))
+        axs[1][0].plot(orientations_rad_confidence_forWhale[:,1])
+        axs[1][0].plot(orientations_rad_confidence_forWhale_filtered[:,1])
+        axs[0][0].set_title('Orientation Angle')
+        axs[1][0].set_title('Head/Tail Confidence')
+        axs[1][0].set_xlabel('Frame Index')
+        axs[1][0].set_ylabel('Confidence')
+        axs[0][0].set_ylabel('Angle [degrees]')
+        plt.suptitle('Original and Smoothed Orientations for Whale Index %d' % whale_index)
+    
+    print_ifDesired('  Finished smoothing the orientations and confidences in %0.2fs' % (time.time() - start_time_s))
+    print_ifDesired('')
+    if len(whale_indexes_toPlot) > 0:
+      plt.show(block=True)
+    
+    # Update the HDF5 file if desired.
+    if edit_hdf5_data:
+      self._datasets['orientations_rad_confidence'][:,:,:] = orientations_rad_confidence
+      # Recompute whether whales exist in each frame.
+      self._recompute_whale_segmentations_exist()
+    
+    return orientations_rad_confidence
+    
+  # Return a version of bounding boxes that has been smoothed using a rolling filter.
+  # Can optionally edit the current HDF5 file.
+  # The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  def smooth_bounding_boxes(self, bounding_box_key='full',
+                            window_size_preCenter=20, window_size_postCenter=20,
+                            whale_indexes_toSmooth='all', edit_hdf5_data=False,
+                            whale_indexes_toPlot=None, whale_indexes_toAnimate=None,
+                            print_status=False):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if edit_hdf5_data and not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    
+    # Initialize.
+    start_time_s = time.time()
+    bounding_boxes = np.array(self.get_all_bounding_boxes_4xy(bounding_box_key=bounding_box_key)) # Load into memory instead of editing the current HDF5 file
+    if isinstance(whale_indexes_toSmooth, str) and whale_indexes_toSmooth.lower().strip() == 'all':
+      whale_indexes_toSmooth = None
+    if whale_indexes_toPlot is None:
+      whale_indexes_toPlot = []
+    elif isinstance(whale_indexes_toPlot, str) and whale_indexes_toPlot.lower().strip() == 'all':
+      whale_indexes_toPlot = list(range(bounding_boxes.shape[1]))
+    if whale_indexes_toAnimate is None:
+      whale_indexes_toAnimate = []
+    elif isinstance(whale_indexes_toAnimate, str) and whale_indexes_toAnimate.lower().strip() == 'all':
+      whale_indexes_toAnimate = list(range(bounding_boxes.shape[1]))
+    showed_plots = False
+    def print_ifDesired(args, kwargs=None):
+      if isinstance(args, str):
+        args = [args]
+      if print_status:
+        if kwargs is not None:
+          print(*args, **kwargs)
+        else:
+          print(*args)
+    
+    # Ignore warnings about dividing by zero or invalid values,
+    #  since those cases will be handled explicitly after the division.
+    with np.errstate(divide='ignore', invalid='ignore'):
+      print_ifDesired('Smoothing bounding boxes with window size [%d, %d]' % (window_size_preCenter, window_size_postCenter))
+      # Process each whale index.
+      for whale_index in range(bounding_boxes.shape[1]):
+        t0 = time.time()
+        print_ifDesired('Filtering bounding boxes [%s] for whale index %d... ' % (bounding_box_key, whale_index), {'end':''})
+        # Extract the data, and set invalid entries to nan.
+        boxes_forWhale = np.squeeze(np.copy(bounding_boxes[:, whale_index, :]).reshape((-1, 4, 2))).astype(float)
+        boxes_forWhale[np.all(boxes_forWhale == 0, axis=(1,2)),:,:] = np.nan
+        # Compute the center of each box, and the half-diagonals from the center to two consecutive corners.
+        box_centers_forWhale = np.nanmean(boxes_forWhale, axis=1)
+        box_halfDiagonals0_forWhale = boxes_forWhale[:, 0, :] - box_centers_forWhale
+        box_halfDiagonals1_forWhale = boxes_forWhale[:, 1, :] - box_centers_forWhale
+        # Apply a median filter to each of these quantities.
+        box_centers_forWhale[np.isnan(box_centers_forWhale)] = -1
+        box_halfDiagonals0_forWhale[np.isnan(box_halfDiagonals0_forWhale)] = -1
+        box_halfDiagonals1_forWhale[np.isnan(box_halfDiagonals1_forWhale)] = -1
+        box_centers_forWhale = scipy.ndimage.median_filter(box_centers_forWhale,
+                                                            size=(window_size_preCenter+window_size_postCenter+1),
+                                                            mode='reflect', origin=0, axes=[0])
+        box_halfDiagonals0_forWhale = scipy.ndimage.median_filter(box_halfDiagonals0_forWhale,
+                                                            size=(window_size_preCenter+window_size_postCenter+1),
+                                                            mode='reflect', origin=0, axes=[0])
+        box_halfDiagonals1_forWhale = scipy.ndimage.median_filter(box_halfDiagonals1_forWhale,
+                                                            size=(window_size_preCenter+window_size_postCenter+1),
+                                                            mode='reflect', origin=0, axes=[0])
+        box_centers_forWhale[box_centers_forWhale == -1] = np.nan
+        box_halfDiagonals0_forWhale[box_halfDiagonals0_forWhale == -1] = np.nan
+        box_halfDiagonals1_forWhale[box_halfDiagonals1_forWhale == -1] = np.nan
+        # Initialize the filtered results.
+        boxes_forWhale_filtered = np.zeros_like(boxes_forWhale)
+        
+        # The first two consecutive corners can be computed directly from the filtered half-diagonals and the filtered centers.
+        boxes_forWhale_filtered[:, 0, :] = box_centers_forWhale + box_halfDiagonals0_forWhale
+        boxes_forWhale_filtered[:, 1, :] = box_centers_forWhale + box_halfDiagonals1_forWhale
+        
+        # The other two corners will be the first two corners reflected about a line.
+        #  The reflection line will pass through the center,
+        #  and be parallel to the side connecting the first two corners.
+        
+        # First, compute the slope and intercept of the box side connecting the two known corners.
+        slopes = (boxes_forWhale_filtered[:, 0, 1] - boxes_forWhale_filtered[:, 1, 1]) / (boxes_forWhale_filtered[:, 0, 0] - boxes_forWhale_filtered[:, 1, 0])
+        intercepts = box_centers_forWhale[:, 1] - slopes*box_centers_forWhale[:, 0]
+        
+        # Now compute the slope of the line perpendicular to this side.
+        reflection_slopes = -1/slopes
+        
+        # For the third corner, compute the line that goes through the previous corner.
+        reflection_intercepts = boxes_forWhale_filtered[:, 1, 1] - reflection_slopes*boxes_forWhale_filtered[:, 1, 0]
+        # Then find the x coordinate of the midpoint of this side of the box.
+        #   It will be the point that intersects two lines:
+        #     1) The line parallel to the first side that passes through the center
+        #     2) The line parallel to the current side (perpendicular to the first side) passing through the previous corner.
+        side_centers_x = (reflection_intercepts - intercepts) / (slopes - reflection_slopes)
+        # Compute the delta-x from this side midpoint to the previous corner.
+        # The third corner will be this delta-x from the side midpoint.
+        boxes_forWhale_filtered[:, 2, 0] = side_centers_x + (side_centers_x - boxes_forWhale_filtered[:, 1, 0])
+        # Use the equation of the perpendicular line to compute the third corner y.
+        boxes_forWhale_filtered[:, 2, 1] = reflection_slopes*boxes_forWhale_filtered[:, 2, 0] + reflection_intercepts
+        
+        # Do the same for the fourth corner, but using the first corner as the reflection reference point.
+        reflection_intercepts = boxes_forWhale_filtered[:, 0, 1] - reflection_slopes*boxes_forWhale_filtered[:, 0, 0]
+        side_centers_x = (reflection_intercepts - intercepts) / (slopes - reflection_slopes)
+        boxes_forWhale_filtered[:, 3, 0] = side_centers_x + (side_centers_x - boxes_forWhale_filtered[:, 0, 0])
+        boxes_forWhale_filtered[:, 3, 1] = reflection_slopes*boxes_forWhale_filtered[:, 3, 0] + reflection_intercepts
+        
+        # If the first side was horizontal, the perpendicular slope is infinite.
+        # In this case, the third and fourth corners can simply copy the x coordinates of the first two corners
+        #  and have their y coordinates be computed based on the delta-y from the first side to the center.
+        reflection_slope_is_inf = np.isinf(reflection_slopes)
+        if np.any(reflection_slope_is_inf):
+          boxes_forWhale_filtered[reflection_slope_is_inf, 2, 0] = boxes_forWhale_filtered[reflection_slope_is_inf, 1, 0]
+          boxes_forWhale_filtered[reflection_slope_is_inf, 3, 0] = boxes_forWhale_filtered[reflection_slope_is_inf, 0, 0]
+          boxes_forWhale_filtered[reflection_slope_is_inf, 2, 1] = box_centers_forWhale[reflection_slope_is_inf, 1] + (box_centers_forWhale[reflection_slope_is_inf, 1] - boxes_forWhale_filtered[reflection_slope_is_inf, 1, 1])
+          boxes_forWhale_filtered[reflection_slope_is_inf, 3, 1] = boxes_forWhale_filtered[reflection_slope_is_inf, 2, 1]
+        # If the first side was vertical, the perpendicular slope is zero.
+        # In this case, the third and fourth corners can simply copy the y coordinates of the first two corners
+        #  and have their x coordinates be computed based on the delta-x from the first side to the center.
+        reflection_slope_is_zero = reflection_slopes == 0
+        if np.any(reflection_slope_is_zero):
+          boxes_forWhale_filtered[reflection_slope_is_zero, 2, 1] = boxes_forWhale_filtered[reflection_slope_is_zero, 1, 1]
+          boxes_forWhale_filtered[reflection_slope_is_zero, 3, 1] = boxes_forWhale_filtered[reflection_slope_is_zero, 0, 1]
+          boxes_forWhale_filtered[reflection_slope_is_zero, 2, 0] = box_centers_forWhale[reflection_slope_is_zero, 0] + (box_centers_forWhale[reflection_slope_is_zero, 0] - boxes_forWhale_filtered[reflection_slope_is_zero, 1, 0])
+          boxes_forWhale_filtered[reflection_slope_is_zero, 3, 0] = boxes_forWhale_filtered[reflection_slope_is_zero, 2, 0]
+        
+        # Store the result in memory.
+        bounding_boxes[:, whale_index, :] = boxes_forWhale_filtered.reshape((-1, 8)).astype(float)
+        print_ifDesired('completed in %0.2fs' % (time.time() - t0))
+        
+        # Plot the original and smoothed coordinates if desired.
+        if whale_index in whale_indexes_toPlot:
+          fig, axs = plt.subplots(nrows=4, ncols=2,
+                                     squeeze=False, # if False, always return 2D array of axes
+                                     sharex=True, sharey=False,
+                                     subplot_kw={'frame_on': True},
+                                     figsize=(4,6),
+                                     )
+          plt.get_current_fig_manager().window.showMaximized()
+          for row_index in range(4):
+            for col_index in range(2):
+              axs[row_index][col_index].plot(boxes_forWhale[:,row_index,col_index])
+              axs[row_index][col_index].plot(boxes_forWhale_filtered[:,row_index,col_index])
+              axs[row_index][col_index].grid(True, color='lightgray')
+              axs[row_index][col_index].set_title('%s For Corner %d' % ('X' if col_index == 0 else 'Y', row_index))
+              if row_index == 3:
+                axs[row_index][col_index].set_xlabel('Frame Index')
+            axs[row_index][0].set_ylabel('Mask Coordinate')
+          plt.suptitle('Original and Smoothed Boxes Type [%s] for Whale Index %d' % (bounding_box_key, whale_index))
+          showed_plots = True
+        
+        # Animate the original and smoothed boxes if desired.
+        if whale_index in whale_indexes_toAnimate:
+          plt.figure()
+          plt.grid(True, color='lightgray')
+          plt.xlabel('Mask X Coordinate')
+          plt.ylabel('Mask Y Coordinate')
+          plt.show(block=False)
+          for frame_index in range(boxes_forWhale_filtered.shape[0]):
+            plt.title('Original and Smoothed Boxes Type [%s] for Whale Index %d Frame Index %d' % (bounding_box_key, whale_index, frame_index))
+            box = boxes_forWhale[frame_index]
+            box_filtered = boxes_forWhale_filtered[frame_index]
+            del plt.gca().lines[:]
+            plt.plot(box[:,0], box[:,1], 'k.-')
+            plt.plot(box_filtered[:,0], box_filtered[:,1], 'm.-')
+            plt.plot(box_filtered[0,0], box_filtered[0,1], 'c.')
+            plt.plot(box_centers_forWhale[frame_index,0], box_centers_forWhale[frame_index,1], 'm.')
+            plt.gca().set_aspect('equal', 'box')
+            plt.xlim([0, self.get_frame_shape()[1]])
+            plt.ylim([0, self.get_frame_shape()[0]])
+            plt.draw()
+            cv2.waitKey(1)
+        
+    print_ifDesired('  Finished smoothing the bounding boxes in %0.2fs' % (time.time() - start_time_s))
+    print_ifDesired('')
+    if showed_plots:
+      plt.show(block=True)
+    
+    # Update the HDF5 file if desired.
+    if edit_hdf5_data:
+      self._datasets[self._bounding_box_key_to_name(bounding_box_key)][:,:,:] = bounding_boxes
+      # Recompute whether whales exist in each frame.
+      self._recompute_whale_segmentations_exist()
+    
+    return bounding_boxes
+  
+  # Smooth the masks using a rolling filter.
+  # Will edit the current HDF5 file.
+  # The window size and centering is defined by window_size_preCenter and window_size_postCenter.
+  # For each pixel of each frame, will compute the mean of the masks from window_size_preCenter frames before it
+  #  through window_size_postCenter frames after it.
+  #  That pixel will be 1 if the mean is at least rolling_mean_threshold, and 0 otherwise.
+  # NOTE: If rolling_mean_threshold is set to 0.5, this is effectively a rolling median filter.
+  def smooth_masks(self, window_size_preCenter=20, window_size_postCenter=20,
+                         rolling_mean_threshold=0.5,
+                         whale_indexes_toSmooth='all',
+                         print_status=True):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('The Segmentations object must be created with the "writable" argument to enable smoothing masks')
+      
+    # Initialize.
+    start_time_s = time.time()
+    masks = self.get_all_masks()
+    centroids = self.get_all_centroids_xy()
+    bounding_boxes = self.get_all_bounding_boxes_4xy(bounding_box_key='full')
+    if isinstance(whale_indexes_toSmooth, str) and whale_indexes_toSmooth.lower().strip() == 'all':
+      whale_indexes_toSmooth = None
+    def print_ifDesired(args, kwargs=None):
+      if isinstance(args, str):
+        args = [args]
+      if print_status:
+        if kwargs is not None:
+          print(*args, **kwargs)
+        else:
+          print(*args)
+    
+    # Process each whale index.
+    print_ifDesired('Smoothing masks with window size [%d, %d] and threshold %g' % (window_size_preCenter, window_size_postCenter, rolling_mean_threshold))
+    for whale_index in range(masks.shape[1]):
+      if whale_indexes_toSmooth is not None and whale_index not in whale_indexes_toSmooth:
+        continue
+      print_ifDesired('  Smoothing masks for whale index %d/%d' % (whale_index, masks.shape[1]-1))
+      
+      # Determine the frame entries that contain this whale instance.
+      centroids_forWhale = centroids[:, whale_index, :]
+      entries_have_whale = np.all(centroids_forWhale > 0, axis=1)
+      if np.sum(entries_have_whale) == 0:
+        continue
+      entries_with_whale = np.where(entries_have_whale)[0]
+      first_entry_with_whale = entries_with_whale[0]
+      last_entry_with_whale = entries_with_whale[-1]
+      # Determine the span of frame entries that should be processed for filtering.
+      # Will start and end beyond the first and last instance according to the filtering window,
+      #   since the span of the filtered version may change based on the filter threshold.
+      first_entry_toProcess = max(0, first_entry_with_whale - window_size_preCenter)
+      last_entry_toProcess = min(len(masks) - 1, last_entry_with_whale + window_size_postCenter)
+      print_ifDesired('    Will process %d frames, from index %d to %d' % (last_entry_toProcess-first_entry_toProcess+1, first_entry_toProcess, last_entry_toProcess))
+      
+      # Determine the span of the image that contains the whale, across all frames.
+      bounding_boxes_forWhale = bounding_boxes[:, whale_index, :].reshape((-1, 4, 2))
+      x_min = int(np.nanmin(bounding_boxes_forWhale[entries_have_whale, :, 0]))
+      x_max = int(np.nanmax(bounding_boxes_forWhale[entries_have_whale, :, 0]))
+      y_min = int(np.nanmin(bounding_boxes_forWhale[entries_have_whale, :, 1]))
+      y_max = int(np.nanmax(bounding_boxes_forWhale[entries_have_whale, :, 1]))
+      x_range = float(x_max - x_min)
+      y_range = float(y_max - y_min)
+      print_ifDesired('    Will process %d pixels, from (%d, %d) to (%d, %d); a %0.1f reduction factor' % (x_range*y_range, x_min, y_min, x_max, y_max, float(np.prod(masks.shape[2:]))/float(x_range*y_range)))
+      
+      # Load the cropped masks for the active frames into memory.
+      print_ifDesired('    Loading cropped masks for this whale... ', {'end': ''})
+      t0 = time.time()
+      # masks_toFilter = np.zeros((last_entry_toProcess-first_entry_toProcess+1, 1, y_max-y_min+1, x_max-x_min+1), dtype=masks.dtype)
+      # masks.read_direct(masks_toFilter, np.s_[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
+      # masks_toFilter = np.squeeze(masks_toFilter)
+      masks_toFilter = np.squeeze(masks[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
+      print_ifDesired('completed in %0.2fs | matrix shape [%d, %d, %d]' % (time.time() - t0, *masks_toFilter.shape))
+      
+      # Compute a fast rolling median.
+      # Taking and thresholding the median on a vector of 0 and 1 is equivalent to checking if the mean is above 0.5
+      #   and computing a sum is much faster than computing a median.
+      # To speed up computing the sum, will store the sum of the current window and then simply
+      #   add/subtract the next/previous frame instead of recomputing an entire sum for each window.
+      print_ifDesired('    Computing the rolling filter')
+      masks_filtered = np.zeros_like(masks_toFilter) # will be the end result
+      mask_window_sum = None # the sum of the mask window
+      reached_end = False # whether the end of the window has reached the end of the frames
+      t0 = time.time()
+      last_print_time = t0
+      for frame_index in range(masks_toFilter.shape[0]):
+        if time.time() - last_print_time > 5 or frame_index == masks_toFilter.shape[0]-1:
+          print_ifDesired('      Processing frame index %5d/%d | elapsed time so far: %0.2fs' % (frame_index, masks_toFilter.shape[0]-1, time.time() - t0))
+          last_print_time = time.time()
+        # Determine the start/end of the current moving window.
+        window_start_frame_index = max(0, frame_index - window_size_preCenter)
+        window_end_frame_index = min(len(masks_toFilter) - 1, frame_index + window_size_postCenter)
+        num_frames_in_sum = (window_end_frame_index - window_start_frame_index + 1)
+        # Determine the sum of the masks in the window.
+        # If this is the first iteration, compute the sum for the whole window.
+        if mask_window_sum is None:
+          mask_window_sum = np.sum(masks_toFilter[window_start_frame_index:window_end_frame_index+1, :, :], axis=0)
+        # If this is not the first iteration, adjust the previous sum instead of processing the entire window.
+        else:
+          # If the window has not reached the end of the data, then its end just advanced by one so add that new frame.
+          if not reached_end:
+            mask_window_sum += masks_toFilter[window_end_frame_index, :, :]
+          reached_end = (window_end_frame_index == (len(masks)-1))
+          # If the window was not pushed against the start of the data, then its start just advanced by one so subtract the previous frame.
+          if window_start_frame_index > 0:
+            mask_window_sum -= masks_toFilter[window_start_frame_index-1, :, :]
+        # Filter based on the mean!
+        frame_filtered = (mask_window_sum/num_frames_in_sum) >= rolling_mean_threshold
+        # Store the result in memory.
+        masks_filtered[frame_index, :, :] = frame_filtered
+      print_ifDesired('    Completed filtering in %0.2fs' % (time.time() - t0))
+      print_ifDesired('    Updating the dataset on disk... ', {'end':''})
+      t0 = time.time()
+      # masks.write_direct(masks_filtered, None, np.s_[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
+      masks[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1] = masks_filtered
+      print_ifDesired('completed in %0.2fs' % (time.time() - t0))
+      print_ifDesired('    Total elapsed time: %0.2fs' % (time.time() - start_time_s))
+    
+    print_ifDesired('  Finished smoothing the whale instance masks')
+  
+  #################################
+  # Video Frames and Visualizations
+  #################################
+  
+  # Add a frame to a desired video.
+  def add_video_frame(self, video_key, frame_index, img, img_format='rgb', write_frame_index=True):
+    # if self._video_readers[video_key] is not None:
+    #   raise AssertionError('Cannot currently add to a video that existed at startup')
+    if self._video_filepaths[video_key] is None:
+      raise AssertionError('No video filepath was provided for key [%s]' % video_key)
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Load the image if a filepath was provided.
+    if isinstance(img, str):
+      img = load_image(img)
+      img = np.squeeze(img[:,:,0:3])
+      img = np.ascontiguousarray(img)
+      img_format = 'rgb'
+    # Only use the first three image channels.
+    img = np.squeeze(img[:,:,0:3])
+    # Create the FFMPEG process if needed.
+    (img_height, img_width, img_depth) = img.shape
+    if self._ff_procs[video_key] is None:
+      self._ff_procs[video_key] = (
+            ffmpeg
+            .input('pipe:', format='rawvideo',
+                   pix_fmt='rgb24',
+                   s='%sx%s'%(int(img_width), int(img_height)),
+                   r=self._output_video_fps,  # assume a constant frame rate. NOTE: If put "r" as an output argument, ffmpeg will add/drop frames to achieve the target rate
+                   )
+            .output(self._video_filepaths[video_key],
+                    vcodec='libx264',
+                    pix_fmt='yuv420p',
+                    crf=self._video_compression,
+                    preset=self._video_preset,
+                    # h264 needs dimensions divisible by 2,
+                    # so add a filter that pads the bottom and right as needed
+                    vf="pad=ceil(iw/2)*2:ceil(ih/2)*2:color=black",
+                    )
+            .run_async(pipe_stdin=True)
+        )
+    # Add the frame number if desired.
+    if write_frame_index:
+      draw_text_on_image(img, 'Frame index: %6d' % frame_index,
+                         pos=(-1, -1),
+                         font_scale=None, text_width_ratio=0.2,
+                         font_thickness=1, font=cv2.FONT_HERSHEY_DUPLEX,
+                         text_color_bgr=(0, 0, 0),
+                         text_bg_color_bgr=(200, 200, 200),
+                         text_bg_outline_color_bgr=None,
+                         text_bg_pad_width_ratio=0.03,
+                         preview_only=False,
+                         )
+    # Convert the image if needed.
+    if img_format.lower().strip() == 'bgr':
+      img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # Write black frames if needed to get to the target frame index.
+    while self._num_video_frames[video_key] < frame_index:
+      img_black = 0*img
+      self._ff_procs[video_key].stdin.write(img_black.astype(np.uint8).tobytes())
+      self._num_video_frames[video_key] += 1
+    # Write the new frame to the video.
+    self._ff_procs[video_key].stdin.write(img.astype(np.uint8).tobytes())
+    self._num_video_frames[video_key] += 1
+    
+    # Save the frame as an image if desired.
+    if video_key in self._video_frame_image_dirs:
+      images_dir = self._video_frame_image_dirs[video_key]
+      # Delete the oldest image if there are more than desired in the folder.
+      images_saved = sorted(glob.glob(os.path.join(images_dir, '*.jpg')))
+      if self._num_video_frames_to_save_as_images > 0 and len(images_saved) >= self._num_video_frames_to_save_as_images:
+        os.remove(images_saved[0])
+      # Save the new image.
+      image_filepath = os.path.join(images_dir, '%s_frame_%06d.jpg' % (video_key, frame_index))
+      cv2.imwrite(image_filepath, cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+    
+  # Get a desired video frame.
+  def get_video_frame(self, video_key, frame_index, resize_to_mask_shape=False,
+                      show_masks=False, show_centroids=False,
+                      show_orientations=False, show_boxes=None, show_whale_indexes=False):
+    if self._ff_procs[video_key] is not None:
+      raise AssertionError('Cannot currently read a video while it is being created')
+    if self._video_filepaths[video_key] is None:
+      raise AssertionError('No video filepath was provided for key [%s]' % video_key)
+    if self._video_readers[video_key] is None:
+      raise AssertionError('No video reader was opened for key [%s]' % video_key)
+    if frame_index < 0 or frame_index >= self._num_video_frames[video_key]:
+      raise ValueError('Invalid frame index %d for video [%s] with %d total frames'%(frame_index, video_key, self._num_video_frames[video_key]))
+    # Load the video frame.
+    img_rgb = self._video_readers[video_key][frame_index].asnumpy()
+    
+    # Resize the image to match the mask shape if desired.
+    annotating_img = show_masks or show_centroids or show_orientations or (show_boxes is not None) or show_whale_indexes
+    if (resize_to_mask_shape or annotating_img) and self.have_masks():
+      img_rgb = scale_image(img_rgb, target_width=self._frame_shape[1], target_height=self._frame_shape[0], maintain_aspect_ratio=False)
+    
+    # Add any desired visualizations to the image.
+    if annotating_img:
+      img_rgb = self.visualize_segmentations(frame_index=frame_index, img_rgb=img_rgb,
+                                             show_masks=show_masks,
+                                             show_centroids=show_centroids,
+                                             show_orientations=show_orientations,
+                                             show_boxes=show_boxes,
+                                             show_whale_indexes=show_whale_indexes)
+    
+    # Return the result.
+    return img_rgb
+  
+  # Add segmentation visualizations to a frame or a graph.
+  # If the image frame is None, will draw on a black image.
+  # If graph is True, will return a Matplotlib graph instead of drawing on an image.
+  #  If graphing, will use the provided figure if one is provided.
+  #  If the image Frame is None and no masks are stored in the segmentations, graph will be True.
+  def visualize_segmentations(self, frame_index, img_rgb=None, graph=False, fig=None,
+                              show_masks=False, show_centroids=False,
+                              show_orientations=False, show_boxes=None,
+                              show_whale_indexes=False):
+    # If no image is provided and there are no masks, use graphing.
+    if img_rgb is None and not self.have_masks():
+      graph = True
+    
+    # Create an image or a plot with the visualizations.
+    if not graph:
+      return self.visualize_segmentations_on_image(frame_index=frame_index, img_rgb=img_rgb,
+                                                    show_masks=show_masks, show_centroids=show_centroids,
+                                                    show_orientations=show_orientations, show_boxes=show_boxes,
+                                                    show_whale_indexes=show_whale_indexes)
+    else:
+      return self.visualize_segmentations_on_graph(frame_index=frame_index, fig=fig,
+                                                    show_masks=show_masks, show_centroids=show_centroids,
+                                                    show_orientations=show_orientations, show_boxes=show_boxes,
+                                                    show_whale_indexes=show_whale_indexes)
+  
+  # Add segmentation visualizations to a frame.
+  # If the image frame is None, will draw on a black image.
+  def visualize_segmentations_on_image(self, frame_index, img_rgb=None,
+                                        show_masks=False, show_centroids=False,
+                                        show_orientations=False, show_boxes=None,
+                                        show_whale_indexes=False):
+    # Create a black image if no frame was provided.
+    if img_rgb is None:
+      img_rgb = np.zeros((*self.get_frame_shape(), 3), dtype=np.uint8)
+      
+    # Resize the image to match the mask shape.
+    if self.have_masks():
+      img_rgb = scale_image(img_rgb, target_width=self._frame_shape[1], target_height=self._frame_shape[0], maintain_aspect_ratio=False)
+    
+    # Define sizes based on the frame size.
+    linewidth_thicker = round(img_rgb.shape[0]*0.01)
+    linewidth_thinner = round(linewidth_thicker*3/4)
+    circle_radius = round(img_rgb.shape[0]*0.01)
+    mask_alpha = 0.5
+    
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    img_bgr_annotated = img_bgr.copy()
+    for whale_index in range(self.get_num_whales()):
+      # Draw the bounding boxes.
+      if show_boxes is not None:
+        bounding_box_colors = {'full': (255,255,255), 'head': (255,255,0), 'tail':(255,0,255)}
+        for bounding_box_key in show_boxes:
+          bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key=bounding_box_key, frame_index=frame_index, whale_index=whale_index)
+          if bounding_box_4xy is not None:
+            bounding_box_points = np.array([bounding_box_4xy[0:2], bounding_box_4xy[2:4],
+                                            bounding_box_4xy[4:6], bounding_box_4xy[6:8]], np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img_bgr_annotated, [bounding_box_points], True,
+                          bounding_box_colors[bounding_box_key],
+                          linewidth_thicker if bounding_box_key == 'full' else linewidth_thinner)
+          else:
+            # The segmentation did not exist for this whale in this frame.
+            pass
+      # Color the masks.
+      if show_masks and self.have_masks():
+        mask = self.get_mask(frame_index=frame_index, whale_index=whale_index)
+        if mask is not None:
+          color_mask = np.zeros_like(img_bgr_annotated)
+          color_mask[mask == 1] = self._segmentations_colors[whale_index % len(self._segmentations_colors)]
+          img_bgr_annotated = cv2.addWeighted(img_bgr_annotated, 1, color_mask, mask_alpha, 0)
+      # Draw the centroid.
+      if show_centroids:
+        centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+        if centroid_xy is not None:
+          cv2.circle(img_bgr_annotated, [round(point) for point in centroid_xy],
+                     circle_radius, (255, 255, 255), -1)
+      # Draw the orientation color-coded by orientation confidence.
+      if show_orientations:
+        (orientation_rad, orientation_confidence) = self.get_orientation_rad_confidence(frame_index=frame_index, whale_index=whale_index)
+        if orientation_rad is not None:
+          # Compute the orientation vector length as the length of the bounding box.
+          bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key='full', frame_index=frame_index, whale_index=whale_index)
+          bounding_boxes_4xy_reshaped = bounding_box_4xy.reshape((-1, 2))
+          orientation_length = max(np.linalg.norm(np.diff(bounding_boxes_4xy_reshaped, axis=0), axis=1))/2
+          # Compute the orientation start/end point.
+          centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+          orientation_start_point = [round(coord) for coord in centroid_xy]
+          orientation_end_point = np.array(orientation_start_point) \
+                                  + orientation_length*np.array([np.cos(orientation_rad), -np.sin(orientation_rad)])
+          orientation_end_point = [round(coord) for coord in orientation_end_point]
+          # Compute the orientation color to represent the confidence.
+          orientation_color_red = round(255*(1-orientation_confidence))
+          orientation_color_green = round(255*orientation_confidence)
+          orientation_color = (0, orientation_color_green, orientation_color_red)
+          # Draw the start point.
+          cv2.circle(img_bgr_annotated, orientation_start_point,
+                     round(circle_radius*0.8), orientation_color, -1)
+          # Draw the orientation vector.
+          cv2.line(img_bgr_annotated, orientation_start_point, orientation_end_point,
+                   orientation_color,
+                   linewidth_thicker)
+        else:
+          # The segmentation did not exist for this whale in this frame.
+          pass
+      # Write the whale indexes.
+      if show_whale_indexes:
+        centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+        if centroid_xy is not None:
+          centroid_xy = centroid_xy.astype(int)
+          bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key='full', frame_index=frame_index, whale_index=whale_index)
+          bounding_boxes_4xy_reshaped = bounding_box_4xy.reshape((-1, 2))
+          # Find a font scale.
+          (text_w, text_h, font_scale, _) = draw_text_on_image(
+            img_bgr_annotated,
+            '%s' % whale_index,
+            pos=(0.5, 0.5),
+            font_scale=None,
+            text_height_ratio=0.02,#(box_width)/img.shape[1],
+            font_thickness=2, font=cv2.FONT_HERSHEY_DUPLEX,
+            text_color_bgr=(255,255,255),
+            text_bg_color_bgr=(0,0,0), text_bg_outline_color_bgr=None,
+            text_bg_pad_width_ratio=0.05,
+            preview_only=True,
+            )
+          # Adjust the text position based on the text size at this font scale.
+          text_xy = centroid_xy + np.array([-text_w, text_h])
+          draw_text_on_image(
+            img_bgr_annotated,
+            '%s' % whale_index,
+            pos=text_xy,
+            font_scale=font_scale,
+            text_height_ratio=None,
+            font_thickness=2, font=cv2.FONT_HERSHEY_DUPLEX,
+            text_color_bgr=(255,255,255),
+            text_bg_color_bgr=(0,0,0), text_bg_outline_color_bgr=None,
+            text_bg_pad_width_ratio=0.05,
+            preview_only=False,
+            )
+    img_rgb = cv2.cvtColor(img_bgr_annotated, cv2.COLOR_BGR2RGB)
+    
+    # Return the result.
+    return img_rgb
+  
+  # Visualize segmentations on a graph.
+  def visualize_segmentations_on_graph(self, frame_index, fig=None,
+                              show_masks=False, show_centroids=False,
+                              show_orientations=False, show_boxes=None,
+                              show_whale_indexes=False):
+    # Create a figure if none was provided.
+    if fig is None:
+      fig = plt.figure()
+      plt.get_current_fig_manager().window.showMaximized()
+      
+    # Define sizes based on the frame size.
+    linewidth_thicker = 3
+    linewidth_thinner = 2
+    circle_radius = 10
+    mask_alpha = 0.1
+    
+    for whale_index in range(self.get_num_whales()):
+      # Color the masks.
+      if show_masks and self.have_masks():
+        mask = self.get_mask(frame_index=frame_index, whale_index=whale_index)
+        if mask is not None:
+          # # NOTE: Attempted to use findcountours, but sometimes the points seemed to be not ordered correctly to create a polygon.
+          # edges = cv2.Canny(mask, 0, 1)
+          # contours, hierarchy = cv2.findContours(edges,
+          #                         cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+          # for contour in contours:
+          #   coords_xy = np.squeeze(contour)
+          #   # plt.plot(coords_xy[:,0], coords_xy[:,1], '.-', alpha=mask_alpha,
+          #   #        color=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255)
+          #   plt.gca().add_patch(Polygon(
+          #         coords_xy,
+          #         closed=True,
+          #         edgecolor='none',
+          #         facecolor=(0,0,1),#self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255,
+          #         fill=True))
+          coords_yx = np.array(np.where(mask == 1)).T
+          coords_xy = np.fliplr(coords_yx)
+          # TODO compute a polygon boundary rather than just plotting all points?
+          plt.plot(coords_xy[:,0], coords_xy[:,1], 'o', alpha=mask_alpha,
+                   color=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255)
+      # Draw the bounding boxes.
+      if show_boxes is not None:
+        bounding_box_colors = {'full': (0,0,0), 'head': (0,1,1), 'tail':(1,0,1)}
+        for bounding_box_key in show_boxes:
+          bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key=bounding_box_key, frame_index=frame_index, whale_index=whale_index)
+          if bounding_box_4xy is not None:
+            bounding_boxes_4xy_reshaped = bounding_box_4xy.reshape((4, 2))
+            plt.gca().add_patch(Polygon(
+                bounding_boxes_4xy_reshaped,
+                closed=True,
+                edgecolor=bounding_box_colors[bounding_box_key],
+                linewidth=linewidth_thicker if bounding_box_key == 'full' else linewidth_thinner,
+                fill=False))
+          else:
+            # The segmentation did not exist for this whale in this frame.
+            pass
+      # Draw the centroid.
+      if show_centroids:
+        centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+        if centroid_xy is not None:
+          plt.gca().add_patch(Circle(
+                centroid_xy,
+                radius=circle_radius,
+                edgecolor='none',
+                facecolor=(0,0,0),
+                fill=True))
+      # Draw the orientation color-coded by orientation confidence.
+      if show_orientations:
+        (orientation_rad, orientation_confidence) = self.get_orientation_rad_confidence(frame_index=frame_index, whale_index=whale_index)
+        if orientation_rad is not None:
+          # Clip the confidence to be between 0 and 1.
+          orientation_confidence = max(0, min(1, orientation_confidence))
+          # Compute the orientation vector length as the length of the bounding box.
+          bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key='full', frame_index=frame_index, whale_index=whale_index)
+          bounding_boxes_4xy_reshaped = bounding_box_4xy.reshape((-1, 2))
+          orientation_length = max(np.linalg.norm(np.diff(bounding_boxes_4xy_reshaped, axis=0), axis=1))/2
+          # Compute the orientation start/end point.
+          centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+          orientation_start_point = [round(coord) for coord in centroid_xy]
+          orientation_end_point = np.array(orientation_start_point) \
+                                  + orientation_length*np.array([np.cos(orientation_rad), -np.sin(orientation_rad)])
+          orientation_end_point = [round(coord) for coord in orientation_end_point]
+          # Compute the orientation color to represent the confidence.
+          orientation_color_red = round(255*(1-orientation_confidence))
+          orientation_color_green = round(255*orientation_confidence)
+          orientation_color = (orientation_color_red, orientation_color_green, 0)
+          orientation_color = np.array(orientation_color)/255
+          # Draw the start point.
+          plt.gca().add_patch(Circle(
+                orientation_start_point,
+                radius=round(circle_radius*0.8),
+                edgecolor='none',
+                facecolor=orientation_color,
+                fill=True))
+          # Draw the orientation vector.
+          plt.plot([orientation_start_point[0], orientation_end_point[0]],
+                   [orientation_start_point[1], orientation_end_point[1]],
+                   '-', color=orientation_color, linewidth=linewidth_thicker)
+        else:
+          # The segmentation did not exist for this whale in this frame.
+          pass
+      # Write the whale indexes.
+      if show_whale_indexes:
+        centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
+        if centroid_xy is not None:
+          centroid_xy = centroid_xy.astype(int)
+          text_str = '%s' % whale_index
+          text_xy = centroid_xy
+          plt.text(text_xy[0], text_xy[1], text_str)
+    
+    # Set the axis limits to the frame size if known.
+    if self.have_masks():
+      frame_shape = self.get_frame_shape()
+      plt.xlim([0, frame_shape[1]])
+      plt.ylim([0, frame_shape[0]])
+    # Flip the y axis to match image coordinates, which has the origin in the upper left.
+    plt.gca().invert_yaxis()
+    # Set an equal aspect ratio.
+    plt.gca().set_aspect('equal', 'box')
+    # Add labels.
+    plt.title('Segmentations for Frame %d' % frame_index)
+    plt.xlabel('Image Coordinate X')
+    plt.ylabel('Image Coordinate Y')
+    
+    # Return the figure.
+    return fig
+  
+  # Visualize centroids over time.
+  # frame_indexes can be 'all' or [start_index, end_index].
+  # whale_indexes can be 'all' or a list of whale indexes to process.
+  # whale_duration_ratio_filter can be None to show all whales, or a number between 0 and 1
+  #   to only show whales that are present in the video for at least that ratio of the video duration.
+  def visualize_centroid_trajectories(self, frame_indexes='all', whale_indexes='all',
+                                            whale_duration_ratio_filter=None,
+                                            apply_smoothing_filter=False,
+                                            smoothing_window_size_preCenter=20, smoothing_window_size_postCenter=20):
+    # Get the centroids, with an optional smoothing filter.
+    centroids_xy = self.get_all_centroids_xy(apply_smoothing_filter=apply_smoothing_filter,
+                                              smoothing_window_size_preCenter=smoothing_window_size_preCenter, smoothing_window_size_postCenter=smoothing_window_size_postCenter,
+                                              whale_indexes_toSmooth=whale_indexes, smoothed_whale_indexes_toPlot=[],
+                                              print_smoothing_status=False)
+    centroids_xy = np.array(centroids_xy) # Load them into memory
+    # Initialize.
+    if isinstance(whale_indexes, str) and whale_indexes.lower().strip() == 'all':
+      whale_indexes = None
+    if isinstance(frame_indexes, str) and frame_indexes.lower().strip() == 'all':
+      frame_indexes = [0, centroids_xy.shape[0]]
+    if whale_duration_ratio_filter is None:
+      whale_duration_ratio_filter = 0
+    fig = plt.figure()
+    plt.get_current_fig_manager().window.showMaximized()
+  
+    # Define plotting parameters.
+    trajectory_linewidth = 2
+    trajectory_markersize = 5
+    trajectory_start_markersize = 15
+    
+    # Visualize the trajectory for each whale.
+    for whale_index in range(self.get_num_whales()):
+      if whale_indexes is not None and whale_index not in whale_indexes:
+        continue
+      # Get the color for this whale index.
+      whale_color = self._segmentations_colors[(whale_index-1) % len(self._segmentations_colors)]/255
+      # Get the trajectory for this whale.
+      x = centroids_xy[frame_indexes[0]:frame_indexes[-1]+1, whale_index, 0]
+      y = centroids_xy[frame_indexes[0]:frame_indexes[-1]+1, whale_index, 1]
+      # Determine the frame indexes with this whale active.
+      frame_indexes_withWhale = np.where(np.all(~np.isnan(centroids_xy[frame_indexes[0]:frame_indexes[-1]+1, whale_index, :]), axis=1))[0]
+      # Filter based on the duration this whale is active.
+      if whale_duration_ratio_filter is not None and len(frame_indexes_withWhale)/centroids_xy.shape[0] < whale_duration_ratio_filter:
+        continue
+      if len(frame_indexes_withWhale) == 0:
+        continue
+      # Plot the starting position.
+      x0 = x[frame_indexes_withWhale[0]]
+      y0 = y[frame_indexes_withWhale[0]]
+      plt.plot(x0, y0,
+               '*', color=whale_color, markersize=trajectory_start_markersize)
+      # Plot the trajectory.
+      plt.plot(x[frame_indexes_withWhale], y[frame_indexes_withWhale],
+               '.-', color=whale_color, markersize=trajectory_markersize, linewidth=trajectory_linewidth)
+      # Label the whale index.
+      text_str = '%s' % whale_index
+      plt.text(x0, y0, text_str, backgroundcolor=(0.8, 0.8, 0.8))
+    # Format the plot.
+    plt.title('Centroid Trajectories')
+    plt.xlabel('Mask X Coordinate')
+    plt.ylabel('Mask Y Coordinate')
+    plt.grid(True, color='lightgray')
+    plt.xlim([0, self.get_frame_shape()[1]])
+    plt.ylim([0, self.get_frame_shape()[0]])
+  
+  
+  ###############################
+  # Cleanup
+  ###############################
+  
+  def quit(self):
+    if self._h5_file is not None:
+      if self._writable:
+        # Resize the datasets to remove any extra empty frames or whale indexes.
+        num_frames = self.get_max_frame_index_segmented()+1
+        whale_frame_counts = self.get_whale_frame_counts()
+        whale_indexes_with_segmentations = np.where(whale_frame_counts > 0)[0]
+        if whale_indexes_with_segmentations.size == 0:
+          print('*** WARNING: It seems like none of the whale indexes have associated segmentations. ')
+          num_whales = None
+        else:
+          num_whales = np.max(whale_indexes_with_segmentations)+1
+        for (dataset_name, dataset) in self._datasets.items():
+          # Specify which dimension is used for frames and whales.
+          # Most datasets have frame as dimension 0 and whales as dimension 1, but there are a few exceptions.
+          frame_dimension = 0
+          whale_dimension = 1
+          if dataset_name == 'whale_ids':
+            frame_dimension = None
+            whale_dimension = 0
+          if dataset_name == 'frames_are_segmented':
+            whale_dimension = None
+          # Trim the frame dimension.
+          if frame_dimension is not None:
+            new_shape = list(dataset.shape)
+            new_shape[frame_dimension] = num_frames
+            dataset.resize(new_shape)
+          # Trim the whale dimension.
+          if whale_dimension is not None and num_whales is not None:
+            new_shape = list(dataset.shape)
+            new_shape[whale_dimension] = num_whales
+            dataset.resize(new_shape)
+      # Close the file
+      try:
+        self._h5_file.close()
+      except ModuleNotFoundError: # something goes out of scope related to calling filter_whale_instances?
+        pass
+      self._h5_file = None
+    # Close any FFMpeg processes and wait for them to finish.
+    try:
+      for ff_proc in self._ff_procs.values():
+        if ff_proc is not None:
+          ff_proc.stdin.close()
+          ff_proc.wait()
+    except AttributeError:
+      pass # The class probably didn't finish initializing and create the self._ff_procs variable
+    
+  def close(self):
+    self.quit()
+
+  def __del__(self):
+    # print('Closing the Segmentations since the object is being deleted')
+    self.close()

@@ -1,0 +1,28 @@
+
+########################
+# File types and temps
+########################
+*.jpg
+*.jpeg
+*.png
+*.pyc
+.idea/
+*.xlsx
+*.pptx
+*.csv
+*.pdf
+*.zip
+*.asv
+*.ipynb
+*.log*
+*.mp4
+*.avi
+*.mov
+*.psd
+**/__pycache__/
+
+########################
+# Data and Results
+########################
+data/
+
