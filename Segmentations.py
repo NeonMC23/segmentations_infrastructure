@@ -45,7 +45,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib.patches import Circle
 
-from segmentation_infrastructure.helpers.helpers_various import *
+from csail_data_processing.helpers.helpers_various import *
 
 class Segmentations:
   ###############################
@@ -84,7 +84,7 @@ class Segmentations:
     # Initialize state.
     self._dataset_expansion_size_frameDimension = 300
     self._dataset_expansion_size_whaleDimension = 10
-    self._h5_compression_level = 9 # 0-9, default is 4
+    self._h5_compression_level = 1 # 0-9, default is 4
     self._bounding_box_keys = ['full', 'head', 'tail']
     self._datasets = {
       'masks': None,
@@ -111,21 +111,33 @@ class Segmentations:
         missing_datasets = [dataset_key for dataset_key in self._datasets if dataset_key not in self._h5_file]
         for missing_dataset in missing_datasets:
           del self._datasets[missing_dataset]
+        metadata = dict(self._h5_file.attrs.items())
+        try:
+          self._frame_shape = eval(metadata['frame_shape'])
+        except KeyError:
+          self._frame_shape = None
+          raise
+      # Store metadata if creating a new file.
+      if (not using_existing_file) and self._writable:
+        metadata = {}
+        metadata['frame_shape'] = list(frame_shape)
+        metadata['format_version'] = 6
+        metadata = convert_dict_values_to_str(metadata, preserve_nested_dicts=False)
+        self._h5_file.attrs.update(metadata)
       # Point to existing datasets if this is an existing file,
       #  or create new ones if this is a new file.
       for dataset_key in self._datasets:
         if dataset_key in self._h5_file:
           self._datasets[dataset_key] = self._h5_file[dataset_key]
-          if dataset_key in ['masks']:
-            self._frame_shape = self._h5_file[dataset_key].shape[2:]
         elif dataset_key == 'masks' and self._writable and not using_existing_file:
-          matrix_shape = [0, 0, *frame_shape] # [frame, whale, frame_resolution]
-          max_matrix_shape = [None, None, *frame_shape] # [frame, whale, frame_resolution]
+          matrix_shape = [0, 0, 0, 0, 2] # [frame, whale, contour, point, xy]
+          max_matrix_shape = [None, None, None, None, 2] # [frame, whale, contour, point, xy]
           self._datasets[dataset_key] = self._h5_file.create_dataset(dataset_key,
                                                                      matrix_shape,
                                                                      maxshape=max_matrix_shape,
-                                                                     dtype='uint8',
-                                                                     chunks=(1,1,*frame_shape),
+                                                                     dtype='int',
+                                                                     fillvalue=-1,
+                                                                     chunks=(64,1,16,1024,2),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key in self._bounding_box_names and self._writable and not using_existing_file:
@@ -136,7 +148,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='float',
                                                                      fillvalue=np.nan,
-                                                                     chunks=True,
+                                                                     chunks=(64,64,8),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'centroids_xy' and self._writable and not using_existing_file:
@@ -147,7 +159,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='float',
                                                                      fillvalue=np.nan,
-                                                                     chunks=True,
+                                                                     chunks=(64,64,2),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'orientations_rad_confidence' and self._writable and not using_existing_file:
@@ -158,7 +170,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='float',
                                                                      fillvalue=np.nan,
-                                                                     chunks=True,
+                                                                     chunks=(64,64,2),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'frames_are_segmented' and self._writable and not using_existing_file:
@@ -168,7 +180,7 @@ class Segmentations:
                                                                      matrix_shape,
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='uint8',
-                                                                     chunks=True,
+                                                                     chunks=(1024,1),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'whale_segmentations_exist' and self._writable and not using_existing_file:
@@ -178,7 +190,7 @@ class Segmentations:
                                                                      matrix_shape,
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='uint8',
-                                                                     chunks=True,
+                                                                     chunks=(128,128),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'whale_ids' and self._writable and not using_existing_file:
@@ -188,7 +200,7 @@ class Segmentations:
                                                                      matrix_shape,
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='S128',
-                                                                     chunks=True,
+                                                                     chunks=(64,1),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
     
@@ -250,6 +262,11 @@ class Segmentations:
                          expand_soft=True, expand_external=True, expand_refs=True,
                          without_attrs=False)
     
+    # Copy metadata.
+    metadata = dict(self._h5_file.attrs.items())
+    metadata = convert_dict_values_to_str(metadata, preserve_nested_dicts=False)
+    new_h5_file.attrs.update(metadata)
+    
     # Close the HDF5 file.
     new_h5_file.close()
     
@@ -308,9 +325,7 @@ class Segmentations:
   
   # Get the shape of a single frame/mask.
   def get_frame_shape(self):
-    if self.have_masks():
-      return self._frame_shape
-    return None
+    return self._frame_shape
   
   # Get a matrix entry index with a segmentation close to the desired frame index, within an optional tolerance.
   def get_closest_frame_index_with_segmentation(self, frame_index, distance_threshold=0):
@@ -347,6 +362,26 @@ class Segmentations:
       return frame_indexes_with_segmentations[best_index]
     # No entry was found to be close enough.
     return None
+  
+  # Get the next frame index with a segmentation.
+  def get_next_frame_index_with_segmentation(self, frame_index):
+    frames_are_segmented = self.get_frames_are_segmented()
+    if frames_are_segmented is None:
+      return None
+    future_frame_indexes_with_segmentations = np.where(frames_are_segmented[frame_index+1:])[0]
+    if future_frame_indexes_with_segmentations.size == 0:
+      return None
+    return future_frame_indexes_with_segmentations[0] + frame_index + 1
+  
+  # Get the previous frame index with a segmentation.
+  def get_previous_frame_index_with_segmentation(self, frame_index):
+    frames_are_segmented = self.get_frames_are_segmented()
+    if frames_are_segmented is None:
+      return None
+    previous_frame_indexes_with_segmentations = np.where(frames_are_segmented[0:frame_index])[0]
+    if previous_frame_indexes_with_segmentations.size == 0:
+      return None
+    return previous_frame_indexes_with_segmentations[-1]
     
   ###################################
   # Whale indexes and IDs
@@ -369,7 +404,7 @@ class Segmentations:
   
   # Recompute whether whale segmentations exist in each frame,
   #  based on the centroids, boxes, and orientations.
-  # Note that it will not consider masks, since that would be quite slow.
+  # Note that it will not consider masks at the moment.
   def _recompute_whale_segmentations_exist(self):
     centroids_xy = self.get_all_centroids_xy()
     orientations_rad_confidence = self.get_all_orientations_rad_confidence()
@@ -485,26 +520,57 @@ class Segmentations:
         self._datasets[dataset_key] = self._h5_file[dataset_key]
   
   # Add a mask for the desired frame index.
-  def add_mask(self, frame_index, whale_index, mask_matrix):
+  # If mask_contours is provided, will use that and ignore mask_matrix.
+  #   mask_contours should be a list of numpy arrays, matching the output of cv2.findcontours
+  #   mask_matrix should be a matrix of 0 and 1 whose shape matches the frame shape.
+  def add_mask(self, frame_index, whale_index, mask_matrix, mask_contours=None, contour_area_threshold_ratio=(1.125/100*1.125/100)):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
       raise AssertionError('Segmentations was opened in read-only mode')
     if not self.have_masks():
       raise AssertionError('The provided HDF5 file does not have masks.')
-    # Expand datasets if needed.
+    # Expand datasets if needed for the number of frames and whales.
     self._expand_datasets(frame_index, whale_index)
-    # Fetch the masks dataset.
-    dataset = self._datasets['masks']
-    # Write the new entry.
-    dataset[frame_index, whale_index, :, :] = np.array(mask_matrix)
+    # Compute the mask contours if a binary mask was provided.
+    if mask_matrix is not None and mask_contours is None:
+      mask_contours, _ = cv2.findContours(mask_matrix, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    # Filter the contours by area.
+    if contour_area_threshold_ratio is not None and self._frame_shape is not None:
+      mask_contours = [contour for contour in mask_contours if cv2.contourArea(contour) >= (contour_area_threshold_ratio*np.prod(self._frame_shape))]
+    # Check if at least one contour was found in the mask; if not, no writing needs to be done.
+    num_contours = len(mask_contours)
+    if num_contours > 0:
+      # Fetch the masks dataset.
+      dataset = self._datasets['masks']
+      # Expand the masks dataset if needed for the number of contours and length of contours.
+      new_shape = list(dataset.shape)
+      contour_lengths = [contour.shape[0] for contour in mask_contours]
+      new_shape[2] = max(new_shape[2], num_contours)
+      new_shape[3] = max(new_shape[3], max(contour_lengths))
+      if not np.array_equal(dataset.shape, new_shape):
+        print('\t RESIZING old shape %s new shape %s' % (dataset.shape, new_shape))
+        dataset.resize(new_shape)
+      # Write the new entry.
+      mask_contours = [np.squeeze(contour) for contour in mask_contours]
+      padding_lengths = [new_shape[3] - contour.shape[0] for contour in mask_contours]
+      mask_contours = [np.pad(contour, ((0, padding_lengths[c]), (0,0)), 'constant', constant_values=-1) for (c, contour) in enumerate(mask_contours)]
+      mask_contours = np.stack(mask_contours)
+      mask_contours = np.pad(mask_contours, ((0, new_shape[2] - num_contours), (0,0), (0,0)), 'constant', constant_values=-1)
+      dataset[frame_index, whale_index, :, :, :] = mask_contours
+      # for (contour_index, contour_points) in enumerate(mask_contours):
+      #   dataset[frame_index, whale_index, contour_index, 0:contour_points.shape[0], :] = np.squeeze(contour_points)
     # Update metadata arrays.
     self._datasets['frames_are_segmented'][frame_index] = 1
-    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(mask_matrix)
+    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = num_contours > 0
     self._num_frames = max(self._num_frames, frame_index+1)
     
   # Get a mask for a desired frame and whale.
-  def get_mask(self, frame_index, whale_index):
+  # If the whale was not segmented in this frame, will return None.
+  # Otherwise, will return a list of matrices that are each Px2, where
+  #  P is the points in the contour
+  #  2 is [x, y]
+  def get_mask_contours(self, frame_index, whale_index):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self.have_masks():
@@ -512,15 +578,61 @@ class Segmentations:
     # Check if the whale segmentation exists for this frame.
     if not self.whale_segmentation_exists(whale_index=whale_index, frame_indexes=frame_index):
       return None
-    # Load the array into memory and return it.
-    return np.array(self._datasets['masks'][frame_index, whale_index, :, :])
+    # Load the array into memory.
+    mask_contours = np.array(self._datasets['masks'][frame_index, whale_index, :, :, :])
+    # Convert from a matrix to a list of matrices, filtering out nan values.
+    mask_contours = [mask_contours[c, mask_contours[c,:,0] >= 0, :] for c in range(mask_contours.shape[0])]
+    mask_contours = [mask_contour for mask_contour in mask_contours if mask_contour.size > 0]
+    return mask_contours
+  
+  # Convert a contour to a dense mask, which is the shape of the frame and all 0s or 1s.
+  def convert_mask_contours_to_dense_mask(self, mask_contours):
+    if self._frame_shape is None:
+      return None
+    # Convert from an np matrix to a list of contours if needed.
+    if isinstance(mask_contours, np.ndarray):
+      mask_contours = [mask_contours[c, mask_contours[c,:,0] >= 0, :] for c in range(mask_contours.shape[0])]
+      mask_contours = [mask_contour for mask_contour in mask_contours if mask_contour.size > 0]
+    # Fill in each contour.
+    dense_mask = np.zeros(self._frame_shape, dtype=np.uint8)
+    dense_mask = cv2.drawContours(dense_mask, mask_contours,
+                                  -1, # -1 means to draw all contours in the given list
+                                  (1,), # value to fill
+                                  -1) # -1 means fill rather than only outline
+    return dense_mask
+  
+  # Check if a point is inside a mask.
+  # Can provide one of the following combinations:
+  #   mask_contours: will check those specific contours.
+  #   frame_index and whale_index: will check the mask for that frame and whale
+  #   frame_index: will return the whale index containing the point if there is one
+  def is_point_inside_segmentation(self, point_xy, mask_contours=None, frame_index=None, whale_index=None):
+    if mask_contours is not None:
+      # Convert from an np matrix to a list of contours if needed.
+      if isinstance(mask_contours, np.ndarray):
+        mask_contours = [mask_contours[c, mask_contours[c,:,0] >= 0, :] for c in range(mask_contours.shape[0])]
+        mask_contours = [mask_contour for mask_contour in mask_contours if mask_contour.size > 0]
+      # Check if the point is in any of the contours.
+      for contour in mask_contours:
+        if cv2.pointPolygonTest(contour, point_xy, False) >= 0: # inside or on the edge
+          return True
+      return False
+    elif frame_index is not None and whale_index is not None:
+      mask_contours = self.get_mask_contours(frame_index, whale_index)
+      return self.is_point_inside_segmentation(point_xy, mask_contours=mask_contours)
+    elif frame_index is not None:
+      for whale_index in range(self.get_num_whales()):
+        if self.is_point_inside_segmentation(point_xy, frame_index=frame_index, whale_index=whale_index):
+          return whale_index
+      return None
+    return None
   
   # Get all masks for a desired frame.
   # If as_dict is True, will return a dictionary mapping whale index to mask.
-  #   Each mask is HxW, matching the frame resolution.
+  #   Each mask is a list of contours, where a contour is a Px2 numpy array of xy points.
   #   Values will be None if there was no segmentation for that whale index.
-  # Otherwise, will return an IxHxW matrix of the masks at this frame.
-  def get_masks(self, frame_index, as_dict=False):
+  # Otherwise, will return an IxCxPx2 matrix of the mask contours at this frame where I is whale and C is contour.  Unused values will be -1.
+  def get_masks_contours(self, frame_index, as_dict=False):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self.have_masks():
@@ -530,31 +642,41 @@ class Segmentations:
       return None
     # Fetch the masks for this frame.
     if as_dict:
-      masks = OrderedDict()
+      masks_contours = OrderedDict()
       for whale_index in range(self.get_num_whales()):
-        masks[whale_index] = self.get_mask(frame_index=frame_index, whale_index=whale_index)
+        masks_contours[whale_index] = self.get_mask_contours(frame_index=frame_index, whale_index=whale_index)
     else:
       dataset = self._datasets['masks']
       if frame_index < 0 or frame_index >= dataset.shape[0]:
         return None
       # Load the array into memory and return it.
-      masks = np.squeeze(dataset[frame_index, :, :, :])
-    return masks
+      masks_contours = np.squeeze(dataset[frame_index, :, :, :, :])
+    return masks_contours
   
   # Get masks for all frames and whales.
-  # Will return an NxIxHxW matrix, where N is the number of frames, I is the number of whales, and HxW is the video resolution.
-  # Will return the HDF5 dataset (data on disk), since the whole matrix likely cannot fit in memory.
-  def get_all_masks(self):
+  # Will return an NxIxCxPx2 matrix, where
+  #   N is the number of frames
+  #   I is the number of whales
+  #   C is the number of contours
+  #   P is the number points defining the contour
+  #   2 is [x, y]
+  # Will return an HDF5 dataset pointer instead of a numpy array, in case the matrix is large.
+  def get_all_masks_contours(self):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self.have_masks():
       raise AssertionError('The provided HDF5 file does not have masks.')
     # Will not cast it to an array / copy it / squeeze it, since we do not want
-    #  to force it to load into memory - it would be too large.
+    #  to force it to load into memory in case it is large.
     return self._datasets['masks']
   
   # Set the masks for a desired whale in the desired frames.
-  def set_masks(self, frame_indexes, whale_index, masks):
+  # masks_contours should be NxCxPx2 where
+  #   N matches len(frame_indexes)
+  #   C matches the max number of contours
+  #   P matches the max number of points per contour
+  #   2 is [x,y]
+  def set_masks_contours(self, frame_indexes, whale_index, masks_contours):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self.have_masks():
@@ -564,18 +686,19 @@ class Segmentations:
     # Get a pointer to the current dataset.
     dataset = self._datasets['masks']
     # Verify the new shape and type.
-    if masks.shape[0] != len(frame_indexes):
-      raise AssertionError('The new mask matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
-    if (masks.shape[2] != dataset.shape[2]) or (masks.shape[3] != dataset.shape[3]):
-      raise AssertionError('The new mask matrix has frame shape %s, but the current frame shape is %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
-    if masks.dtype != dataset.dtype:
-      raise AssertionError('The new mask matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+    if masks_contours.shape[0] != len(frame_indexes):
+      raise AssertionError('The new mask matrix has %d frames, but will be assigned to %d indexes.' % (masks_contours.shape[0], len(frame_indexes)))
+    if (masks_contours.shape[2] != dataset.shape[2]) or (masks_contours.shape[3] != dataset.shape[3]):
+      raise AssertionError('The new mask matrix has frame shape %s, but the current frame shape is %s.' % (list(masks_contours.shape[2:]), list(dataset.shape[2:])))
+    if masks_contours.dtype != dataset.dtype:
+      raise AssertionError('The new mask matrix has type %s, but the dataset on disk has type %s.' % (masks_contours.dtype, dataset.dtype))
     # Assign the new masks.
-    dataset[frame_indexes, whale_index, :, :] = masks
+    dataset[frame_indexes, whale_index, :, :, :] = masks_contours
     # Update metadata arrays.
     self._datasets['frames_are_segmented'][frame_indexes] = 1
     for (mask_index, frame_index) in enumerate(frame_indexes):
-      self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(masks[mask_index, :, :])
+      mask_contours = masks_contours[mask_index, :, :, :]
+      self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(mask_contours >= 0)
   
   
   ###############################
@@ -816,11 +939,11 @@ class Segmentations:
     dataset = self._datasets['centroids_xy']
     # Verify the new shape and type.
     if centroids_xy.shape[0] != len(frame_indexes):
-      raise AssertionError('The new centroids matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
+      raise AssertionError('The new centroids matrix has %d frames, but will be assigned to %d indexes.' % (centroids_xy.shape[0], len(frame_indexes)))
     if (centroids_xy.shape[2] != dataset.shape[2]) or (centroids_xy.shape[3] != dataset.shape[3]):
-      raise AssertionError('The new centroids matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
+      raise AssertionError('The new centroids matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(centroids_xy.shape[2:]), list(dataset.shape[2:])))
     if centroids_xy.dtype != dataset.dtype:
-      raise AssertionError('The new centroids matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+      raise AssertionError('The new centroids matrix has type %s, but the dataset on disk has type %s.' % (centroids_xy.dtype, dataset.dtype))
     # Assign the new bounding boxes.
     dataset[frame_indexes, whale_index, :] = centroids_xy
     # Update metadata arrays.
@@ -936,11 +1059,11 @@ class Segmentations:
     dataset = self._datasets['orientations_rad_confidence']
     # Verify the new shape and type.
     if orientations_rad_confidence.shape[0] != len(frame_indexes):
-      raise AssertionError('The new orientations matrix has %d frames, but will be assigned to %d indexes.' % (masks.shape[0], len(frame_indexes)))
+      raise AssertionError('The new orientations matrix has %d frames, but will be assigned to %d indexes.' % (orientations_rad_confidence.shape[0], len(frame_indexes)))
     if (orientations_rad_confidence.shape[2] != dataset.shape[2]) or (orientations_rad_confidence.shape[3] != dataset.shape[3]):
-      raise AssertionError('The new orientations matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(masks.shape[2:]), list(dataset.shape[2:])))
-    if centroids_xy.dtype != dataset.dtype:
-      raise AssertionError('The new orientations matrix has type %s, but the dataset on disk has type %s.' % (masks.dtype, dataset.dtype))
+      raise AssertionError('The new orientations matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(orientations_rad_confidence.shape[2:]), list(dataset.shape[2:])))
+    if orientations_rad_confidence.dtype != dataset.dtype:
+      raise AssertionError('The new orientations matrix has type %s, but the dataset on disk has type %s.' % (orientations_rad_confidence.dtype, dataset.dtype))
     # Assign the new bounding boxes.
     dataset[frame_indexes, whale_index, :] = orientations_rad_confidence
     # Update metadata arrays.
@@ -953,36 +1076,58 @@ class Segmentations:
   # Edit segmentations
   ###############################
   
+  # Determine the region of frames within the requested window where a whale actually exists.
+  # Optionally provide a window of frames to search.
+  # Will return (frame_index_start, frame_index_end) or (None, None) if the whale was not found.
+  def get_frame_indexes_with_whale_segmentation(self, whale_index, frame_index_start=None, frame_index_end=None):
+    if frame_index_start is None:
+      frame_index_start = 0
+    if frame_index_end is None:
+      frame_index_end = self.get_num_frames_total()-1
+    whale_exists = self.whale_segmentation_exists(whale_index)[frame_index_start:frame_index_end+1]
+    whale_exists_indexes = np.where(whale_exists)[0]
+    if whale_exists_indexes.size == 0:
+      return (None, None)
+    frame_index_end = frame_index_start + whale_exists_indexes[-1]
+    frame_index_start = frame_index_start + whale_exists_indexes[0]
+    return (frame_index_start, frame_index_end)
+    
   # Remove a segmentation for a whale index in the desired frames.
   # Will update the masks, bounding boxes, centroids, and orientations.
-  def remove_segmentation(self, frame_indexes, whale_index, print_status=False):
-    if print_status: print('Removing segmentations for whale index %d from %d frames (min %d, max %d)' % (whale_index, len(frame_indexes), min(frame_indexes), max(frame_indexes)))
+  def remove_segmentation(self, whale_index, frame_index_start, frame_index_end, print_status=False):
+    if print_status: print('Removing segmentations for whale index %d from frames [%d, %d])' % (whale_index, frame_index_start, frame_index_end))
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    
+    # Determine the region of frames within the requested window where either whale actually exists.
+    # Outside of that window, no data needs to be copied since all are already np.nan (or -1 for masks).
+    (frame_index_start, frame_index_end) = self.get_frame_indexes_with_whale_segmentation(
+        whale_index, frame_index_start=frame_index_start, frame_index_end=frame_index_end)
+    # If the whale never exists, no editing is needed.
+    if frame_index_start is None:
+      return
+    
     # Remove from masks.
     if self.have_masks():
       if print_status: print(' Updating masks; this may take some time and memory if many frames are selected')
-      # Determine the span of pixels for this whale.
-      bounding_boxes_forWhale = self._datasets[self._bounding_box_key_to_name('full')][frame_indexes, whale_index, :]
-      bounding_boxes_forWhale = bounding_boxes_forWhale.reshape((-1, 4, 2))
-      x_min = np.nanmin(bounding_boxes_forWhale[:, :, 0])
-      x_max = np.nanmax(bounding_boxes_forWhale[:, :, 0])
-      y_min = np.nanmin(bounding_boxes_forWhale[:, :, 1])
-      y_max = np.nanmax(bounding_boxes_forWhale[:, :, 1])
-      # Set these pixels to 0 in the masks.
-      self._datasets['masks'][frame_indexes, whale_index, y_min:y_max, x_min:x_max] = 0
+      # Note that loading the submatrix, assigning the value in memory, and then assigning the submatrix
+      #  was *much* faser than simply assigning the value to the dataset slice.
+      dataset = self._datasets['masks']
+      masks = np.empty((frame_index_end-frame_index_start+1, *dataset.shape[2:]), dtype=dataset.dtype)
+      masks[:] = -1
+      dataset[frame_index_start:frame_index_end+1, whale_index, :, :, :] = masks
     # Remove from bounding boxes.
     if print_status: print(' Updating bounding boxes')
     for box_key in self._bounding_box_keys:
-      self._datasets[self._bounding_box_key_to_name(box_key)][frame_indexes, whale_index, :] = np.nan
+      self._datasets[self._bounding_box_key_to_name(box_key)][frame_index_start:frame_index_end+1, whale_index, :] = np.nan
     # Remove from centroids.
     if print_status: print(' Updating centroids')
-    self._datasets['centroids_xy'][frame_indexes, whale_index, :] = np.nan
+    self._datasets['centroids_xy'][frame_index_start:frame_index_end+1, whale_index, :] = np.nan
     # Remove from orientations.
     if print_status: print(' Updating orientations')
-    self._datasets['orientations_rad_confidence'][frame_indexes, whale_index, :] = np.nan
+    self._datasets['orientations_rad_confidence'][frame_index_start:frame_index_end+1, whale_index, :] = np.nan
     # Update metadata arrays.
-    self._datasets['whale_segmentations_exist'][frame_indexes, whale_index] = 0
+    self._datasets['whale_segmentations_exist'][frame_index_start:frame_index_end+1, whale_index] = 0
   
   # Remove a whale index entirely.
   def remove_whale_indexes(self, whale_indexes_toRemove, print_status=False):
@@ -996,14 +1141,24 @@ class Segmentations:
     
     if print_status: print('Removing the following whale indexes: %s' % whale_indexes_toRemove)
     
-    # If only one is being removed, swap it to the end then resize to remove the end.
-    # This will be much faster for the masks.
-    if len(whale_indexes_toRemove) == 1:
-      whale_index_toRemove = whale_indexes_toRemove[0]
-      self.swap_whale_indexes(whale_index_toRemove, self.get_num_whales()-1,
+    # Do a series of swaps to put the indexes to remove at the end, then resize to remove them.
+    # This will likely be faster for the masks.
+    end_index_toSwap = self.get_num_whales()-1
+    for whale_index_toRemove in whale_indexes_toRemove:
+      self.swap_whale_indexes(whale_index_toRemove, end_index_toSwap,
                               0, self.get_num_frames_total()-1,
                               swap_whale_ids=True)
-      whale_indexes_toRemove = [self.get_num_whales()-1]
+      end_index_toSwap -= 1
+    whale_indexes_toRemove = list(range(end_index_toSwap+1, self.get_num_whales()))
+    
+    # # If only one is being removed, swap it to the end then resize to remove the end.
+    # # This will be faster for the masks.
+    # if len(whale_indexes_toRemove) == 1:
+    #   whale_index_toRemove = whale_indexes_toRemove[0]
+    #   self.swap_whale_indexes(whale_index_toRemove, self.get_num_whales()-1,
+    #                           0, self.get_num_frames_total()-1,
+    #                           swap_whale_ids=True)
+    #   whale_indexes_toRemove = [self.get_num_whales()-1]
     
     # Determine a permutation of the current whale indexes that puts the ones to remove at the end.
     # And determine the whale indexes to keep.
@@ -1015,26 +1170,29 @@ class Segmentations:
     need_to_permute = not np.array_equal(permuted_whale_indexes, np.arange(0, num_whales_original))
     
     # Update masks.
-    # The entire matrix is too large to load, so load it in batches.
+    # The entire matrix might be large, so load it in batches if needed.
     #  In each batch, put the indexes to remove at the end.
     # If the indexes to remove happen to already be the trailing indexes,
     #  then can skip the slow matrix swapping.
     if self.have_masks():
       dataset = self._datasets['masks']
       if need_to_permute:
-        max_gb_to_allocate = 5
-        gb_per_frame_per_whale = 0.0033 # estimate from some previous error printouts
+        max_gb_to_allocate = 10
+        gb_per_frame_per_whale = (np.prod(dataset.shape[2:])*4)/1024/1024/1024 # 4 bytes per entry
         num_frames_to_load = round(max_gb_to_allocate/(gb_per_frame_per_whale*num_whales_original))
         start_frame_index = 0
         while start_frame_index < self.get_num_frames_total():
           end_frame_index = min(self.get_num_frames_total()-1, start_frame_index+num_frames_to_load-1)
           if print_status: print('  Updating masks for frame indexes [%d, %d] out of %d' % (start_frame_index, end_frame_index, self.get_num_frames_total()))
-          masks_permuted = np.zeros((end_frame_index-start_frame_index+1, *dataset.shape[1:]), dtype=dataset.dtype)
-          dataset.read_direct(masks_permuted, np.s_[start_frame_index:end_frame_index+1, :, :, :])
-          masks_permuted = masks_permuted[:, permuted_whale_indexes, :, :]
-          masks_permuted = np.ascontiguousarray(masks_permuted)
-          dataset.write_direct(masks_permuted, None, np.s_[start_frame_index:end_frame_index+1, :, :, :])
+          masks_permuted = np.array(dataset[start_frame_index:end_frame_index+1, :, :, :, :])
+          masks_permuted = masks_permuted[:, permuted_whale_indexes, :, :, :]
+          dataset[start_frame_index:end_frame_index+1, :, :, :, :] = masks_permuted
           start_frame_index = end_frame_index+1
+        #   masks_permuted = np.zeros((end_frame_index-start_frame_index+1, *dataset.shape[1:]), dtype=dataset.dtype)
+        #   dataset.read_direct(masks_permuted, np.s_[start_frame_index:end_frame_index+1, :, :, :])
+        #   masks_permuted = masks_permuted[:, permuted_whale_indexes, :, :]
+        #   masks_permuted = np.ascontiguousarray(masks_permuted)
+        #   dataset.write_direct(masks_permuted, None, np.s_[start_frame_index:end_frame_index+1, :, :, :])
       # Now remove the ones at the end by resizing the dataset.
       if print_status: print('  Resizing the mask matrix to trim the removed whales')
       matrix_shape = list(dataset.shape)
@@ -1097,7 +1255,7 @@ class Segmentations:
     if not self._writable:
       raise AssertionError('Segmentations was opened in read-only mode')
     
-    # First swao the IDs, since they do not depend on the frames.
+    # First swap the IDs, since they do not depend on the frames.
     if swap_whale_ids:
       dataset = self._datasets['whale_ids']
       data_1 = dataset[whale_index_1]
@@ -1105,7 +1263,7 @@ class Segmentations:
       dataset[whale_index_2] = data_1
       
     # Determine the region of frames within the requested window where either whale actually exists.
-    # Outside of that window, no data needs to be copied since all are already np.nan (or 0 for masks).
+    # Outside of that window, no data needs to be copied since all are already np.nan (or -1 for masks).
     whale_1_exists = self.whale_segmentation_exists(whale_index_1)[frame_index_start:frame_index_end+1]
     whale_2_exists = self.whale_segmentation_exists(whale_index_2)[frame_index_start:frame_index_end+1]
     either_whale_exists = whale_1_exists | whale_2_exists
@@ -1115,41 +1273,15 @@ class Segmentations:
       return
     frame_index_end = frame_index_start + either_whale_exists_indexes[-1]
     frame_index_start = frame_index_start + either_whale_exists_indexes[0]
-    print(' frame bounds [%d %d]' % (frame_index_start, frame_index_end), end='')
-    # whale_1_exists = self.whale_segmentation_exists(whale_index_1)
-    # whale_2_exists = self.whale_segmentation_exists(whale_index_2)
-    # either_whale_exists = whale_1_exists | whale_2_exists
-    # either_whale_exists_indexes = np.where(either_whale_exists)[0]
-    # # If neither whale ever exists, no swapping is needed.
-    # if either_whale_exists_indexes.size == 0:
-    #   return
-    # frame_indexes_to_swap = either_whale_exists_indexes[(either_whale_exists_indexes >= frame_index_start) & (either_whale_exists_indexes <= frame_index_end)]
-    # print(' swapping %d frames ' % frame_indexes_to_swap.size, end='')
     
     # Update masks.
     # Assume that the matrix for a single whale over the frame range is small enough to load into memory.
     if self.have_masks():
       dataset = self._datasets['masks']
-      # Determine the span of the image that contains the whale, across all frames.
-      bounding_boxes = self.get_all_bounding_boxes_4xy(bounding_box_key='full')
-      bounding_boxes_forWhale_1 = bounding_boxes[:, whale_index_1, :].reshape((-1, 4, 2))
-      bounding_boxes_forWhale_2 = bounding_boxes[:, whale_index_2, :].reshape((-1, 4, 2))
-      with warnings.catch_warnings():
-        warnings.filterwarnings('ignore', r'All-NaN (slice|axis) encountered')
-        x_min = int(np.nanmin([np.nanmin(b[frame_index_start:frame_index_end+1, :, 0]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
-        x_max = int(np.nanmax([np.nanmax(b[frame_index_start:frame_index_end+1, :, 0]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
-        y_min = int(np.nanmin([np.nanmin(b[frame_index_start:frame_index_end+1, :, 1]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
-        y_max = int(np.nanmax([np.nanmax(b[frame_index_start:frame_index_end+1, :, 1]) for b in [bounding_boxes_forWhale_1, bounding_boxes_forWhale_2]]))
-      x_range = float(x_max - x_min)
-      y_range = float(y_max - y_min)
-      # print('    Will process %d pixels, from (%d, %d) to (%d, %d); a %0.1f reduction factor' % (x_range*y_range, x_min, y_min, x_max, y_max, float(np.prod(dataset.shape[2:]))/float(x_range*y_range)))
-      # Swap the data within the active frames and the active subregion.
-      masks_1 = dataset[frame_index_start:frame_index_end+1, whale_index_1, y_min:y_max+1, x_min:x_max+1]
-      dataset[frame_index_start:frame_index_end+1, whale_index_1, y_min:y_max+1, x_min:x_max+1] = dataset[frame_index_start:frame_index_end+1, whale_index_2, y_min:y_max+1, x_min:x_max+1]
-      dataset[frame_index_start:frame_index_end+1, whale_index_2, y_min:y_max+1, x_min:x_max+1] = masks_1
-      # masks_1 = dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :]
-      # dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :] = dataset[frame_index_start:frame_index_end+1, whale_index_2, :, :]
-      # dataset[frame_index_start:frame_index_end+1, whale_index_2, :, :] = masks_1
+      masks_1 = np.array(dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :, :])
+      masks_2 = np.array(dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :, :])
+      dataset[frame_index_start:frame_index_end+1, whale_index_1, :, :, :] = masks_2
+      dataset[frame_index_start:frame_index_end+1, whale_index_2, :, :, :] = masks_1
     
     # Update centroids, orientations, and bounding boxes.
     dataset_names = ['centroids_xy', 'orientations_rad_confidence'] + [self._bounding_box_key_to_name(bounding_box_key) for bounding_box_key in self.get_bounding_box_keys()]
@@ -1168,7 +1300,6 @@ class Segmentations:
   # Change a whale index to another index in the desired frames.
   # Will clobber any existing segmentation data for the destination whale in those frames.
   # Will mark the segmentation in the source whale index as no longer being present.
-  # If remove_whale_index_source is True, will also delete whale_index_source from the dataset.
   def change_whale_index(self, whale_index_source, whale_index_destination,
                                frame_index_start, frame_index_end):
     if self._h5_file is None:
@@ -1177,7 +1308,7 @@ class Segmentations:
       raise AssertionError('Segmentations was opened in read-only mode')
     
     # Determine the region of frames within the requested window where either whale actually exists.
-    # Outside of that window, no data needs to be copied since all are already np.nan (or 0 for masks).
+    # Outside of that window, no data needs to be copied since all are already np.nan (or -1 for masks).
     whale_source_exists = self.whale_segmentation_exists(whale_index_source)[frame_index_start:frame_index_end+1]
     whale_destination_exists = self.whale_segmentation_exists(whale_index_destination)[frame_index_start:frame_index_end+1]
     either_whale_exists = whale_source_exists | whale_destination_exists
@@ -1191,10 +1322,14 @@ class Segmentations:
     # Update masks.
     # Assume that the matrix for a single whale over the frame range is small enough to load into memory.
     if self.have_masks():
+      # Note that loading the submatrix, assigning the value in memory, and then assigning the submatrix
+      #  was *much* faser than simply assigning the value to the dataset slice.
       dataset = self._datasets['masks']
-      masks_source = dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :]
-      dataset[frame_index_start:frame_index_end+1, whale_index_destination, :, :] = dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :]
-      dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :] = 0
+      masks = np.array(dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :, :])
+      dataset[frame_index_start:frame_index_end+1, whale_index_destination, :, :, :] = masks
+      masks = np.empty((frame_index_end-frame_index_start+1, *dataset.shape[2:]), dtype=dataset.dtype)
+      masks[:] = -1
+      dataset[frame_index_start:frame_index_end+1, whale_index_source, :, :, :] = masks
     
     # Update centroids, orientations, and bounding boxes.
     dataset_names = ['centroids_xy', 'orientations_rad_confidence'] + [self._bounding_box_key_to_name(bounding_box_key) for bounding_box_key in self.get_bounding_box_keys()]
@@ -1223,7 +1358,7 @@ class Segmentations:
     
     # Change the index.
     self.change_whale_index(whale_index_toMove, new_whale_index,
-                            frame_index_start, frame_index_end+1)
+                            frame_index_start, frame_index_end)
     
     # Assign the new ID if provided.
     self.set_whale_id(new_whale_index, new_whale_id)
@@ -1233,7 +1368,7 @@ class Segmentations:
   #################################
   
   # Filter the instances to only keep whales that are found in at least a threshold number of frames.
-  # If create_new_hdf5_file is False, will edit a copy of this file instead of editing in place.
+  # If create_new_hdf5_file is True, will edit a copy of this file instead of editing in place.
   def filter_whale_instances_byCount(self, min_frame_count=150, remove_masks_dataset=False, create_new_hdf5_file=False, overwrite_destination_hdf5_file_if_exists=False):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
@@ -1257,7 +1392,9 @@ class Segmentations:
     whale_indexes_toRemove = np.where(whale_frame_counts < min_frame_count)[0]
     
     # Remove the whales that did not meet the threshold.
-    segmentations_filtered.remove_whale_indexes(whale_indexes_toRemove)
+    t0 = time.time()
+    segmentations_filtered.remove_whale_indexes(whale_indexes_toRemove, print_status=False)
+    print('Removed %d whale indexes in %0.2fs' % (len(whale_indexes_toRemove), time.time()-t0))
     
     # Close the file if a new one was created.
     if create_new_hdf5_file:
@@ -1652,109 +1789,111 @@ class Segmentations:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
       raise AssertionError('The Segmentations object must be created with the "writable" argument to enable smoothing masks')
-      
-    # Initialize.
-    start_time_s = time.time()
-    masks = self.get_all_masks()
-    centroids = self.get_all_centroids_xy()
-    bounding_boxes = self.get_all_bounding_boxes_4xy(bounding_box_key='full')
-    if isinstance(whale_indexes_toSmooth, str) and whale_indexes_toSmooth.lower().strip() == 'all':
-      whale_indexes_toSmooth = None
-    def print_ifDesired(args, kwargs=None):
-      if isinstance(args, str):
-        args = [args]
-      if print_status:
-        if kwargs is not None:
-          print(*args, **kwargs)
-        else:
-          print(*args)
     
-    # Process each whale index.
-    print_ifDesired('Smoothing masks with window size [%d, %d] and threshold %g' % (window_size_preCenter, window_size_postCenter, rolling_mean_threshold))
-    for whale_index in range(masks.shape[1]):
-      if whale_indexes_toSmooth is not None and whale_index not in whale_indexes_toSmooth:
-        continue
-      print_ifDesired('  Smoothing masks for whale index %d/%d' % (whale_index, masks.shape[1]-1))
-      
-      # Determine the frame entries that contain this whale instance.
-      centroids_forWhale = centroids[:, whale_index, :]
-      entries_have_whale = np.all(centroids_forWhale > 0, axis=1)
-      if np.sum(entries_have_whale) == 0:
-        continue
-      entries_with_whale = np.where(entries_have_whale)[0]
-      first_entry_with_whale = entries_with_whale[0]
-      last_entry_with_whale = entries_with_whale[-1]
-      # Determine the span of frame entries that should be processed for filtering.
-      # Will start and end beyond the first and last instance according to the filtering window,
-      #   since the span of the filtered version may change based on the filter threshold.
-      first_entry_toProcess = max(0, first_entry_with_whale - window_size_preCenter)
-      last_entry_toProcess = min(len(masks) - 1, last_entry_with_whale + window_size_postCenter)
-      print_ifDesired('    Will process %d frames, from index %d to %d' % (last_entry_toProcess-first_entry_toProcess+1, first_entry_toProcess, last_entry_toProcess))
-      
-      # Determine the span of the image that contains the whale, across all frames.
-      bounding_boxes_forWhale = bounding_boxes[:, whale_index, :].reshape((-1, 4, 2))
-      x_min = int(np.nanmin(bounding_boxes_forWhale[entries_have_whale, :, 0]))
-      x_max = int(np.nanmax(bounding_boxes_forWhale[entries_have_whale, :, 0]))
-      y_min = int(np.nanmin(bounding_boxes_forWhale[entries_have_whale, :, 1]))
-      y_max = int(np.nanmax(bounding_boxes_forWhale[entries_have_whale, :, 1]))
-      x_range = float(x_max - x_min)
-      y_range = float(y_max - y_min)
-      print_ifDesired('    Will process %d pixels, from (%d, %d) to (%d, %d); a %0.1f reduction factor' % (x_range*y_range, x_min, y_min, x_max, y_max, float(np.prod(masks.shape[2:]))/float(x_range*y_range)))
-      
-      # Load the cropped masks for the active frames into memory.
-      print_ifDesired('    Loading cropped masks for this whale... ', {'end': ''})
-      t0 = time.time()
-      # masks_toFilter = np.zeros((last_entry_toProcess-first_entry_toProcess+1, 1, y_max-y_min+1, x_max-x_min+1), dtype=masks.dtype)
-      # masks.read_direct(masks_toFilter, np.s_[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
-      # masks_toFilter = np.squeeze(masks_toFilter)
-      masks_toFilter = np.squeeze(masks[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
-      print_ifDesired('completed in %0.2fs | matrix shape [%d, %d, %d]' % (time.time() - t0, *masks_toFilter.shape))
-      
-      # Compute a fast rolling median.
-      # Taking and thresholding the median on a vector of 0 and 1 is equivalent to checking if the mean is above 0.5
-      #   and computing a sum is much faster than computing a median.
-      # To speed up computing the sum, will store the sum of the current window and then simply
-      #   add/subtract the next/previous frame instead of recomputing an entire sum for each window.
-      print_ifDesired('    Computing the rolling filter')
-      masks_filtered = np.zeros_like(masks_toFilter) # will be the end result
-      mask_window_sum = None # the sum of the mask window
-      reached_end = False # whether the end of the window has reached the end of the frames
-      t0 = time.time()
-      last_print_time = t0
-      for frame_index in range(masks_toFilter.shape[0]):
-        if time.time() - last_print_time > 5 or frame_index == masks_toFilter.shape[0]-1:
-          print_ifDesired('      Processing frame index %5d/%d | elapsed time so far: %0.2fs' % (frame_index, masks_toFilter.shape[0]-1, time.time() - t0))
-          last_print_time = time.time()
-        # Determine the start/end of the current moving window.
-        window_start_frame_index = max(0, frame_index - window_size_preCenter)
-        window_end_frame_index = min(len(masks_toFilter) - 1, frame_index + window_size_postCenter)
-        num_frames_in_sum = (window_end_frame_index - window_start_frame_index + 1)
-        # Determine the sum of the masks in the window.
-        # If this is the first iteration, compute the sum for the whole window.
-        if mask_window_sum is None:
-          mask_window_sum = np.sum(masks_toFilter[window_start_frame_index:window_end_frame_index+1, :, :], axis=0)
-        # If this is not the first iteration, adjust the previous sum instead of processing the entire window.
-        else:
-          # If the window has not reached the end of the data, then its end just advanced by one so add that new frame.
-          if not reached_end:
-            mask_window_sum += masks_toFilter[window_end_frame_index, :, :]
-          reached_end = (window_end_frame_index == (len(masks)-1))
-          # If the window was not pushed against the start of the data, then its start just advanced by one so subtract the previous frame.
-          if window_start_frame_index > 0:
-            mask_window_sum -= masks_toFilter[window_start_frame_index-1, :, :]
-        # Filter based on the mean!
-        frame_filtered = (mask_window_sum/num_frames_in_sum) >= rolling_mean_threshold
-        # Store the result in memory.
-        masks_filtered[frame_index, :, :] = frame_filtered
-      print_ifDesired('    Completed filtering in %0.2fs' % (time.time() - t0))
-      print_ifDesired('    Updating the dataset on disk... ', {'end':''})
-      t0 = time.time()
-      # masks.write_direct(masks_filtered, None, np.s_[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
-      masks[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1] = masks_filtered
-      print_ifDesired('completed in %0.2fs' % (time.time() - t0))
-      print_ifDesired('    Total elapsed time: %0.2fs' % (time.time() - start_time_s))
+    raise NotImplementedError('Mask smoothing is not yet implemented for the new contour-based storage format')
     
-    print_ifDesired('  Finished smoothing the whale instance masks')
+    # # Initialize.
+    # start_time_s = time.time()
+    # masks = self.get_all_masks()
+    # centroids = self.get_all_centroids_xy()
+    # bounding_boxes = self.get_all_bounding_boxes_4xy(bounding_box_key='full')
+    # if isinstance(whale_indexes_toSmooth, str) and whale_indexes_toSmooth.lower().strip() == 'all':
+    #   whale_indexes_toSmooth = None
+    # def print_ifDesired(args, kwargs=None):
+    #   if isinstance(args, str):
+    #     args = [args]
+    #   if print_status:
+    #     if kwargs is not None:
+    #       print(*args, **kwargs)
+    #     else:
+    #       print(*args)
+    #
+    # # Process each whale index.
+    # print_ifDesired('Smoothing masks with window size [%d, %d] and threshold %g' % (window_size_preCenter, window_size_postCenter, rolling_mean_threshold))
+    # for whale_index in range(masks.shape[1]):
+    #   if whale_indexes_toSmooth is not None and whale_index not in whale_indexes_toSmooth:
+    #     continue
+    #   print_ifDesired('  Smoothing masks for whale index %d/%d' % (whale_index, masks.shape[1]-1))
+    #
+    #   # Determine the frame entries that contain this whale instance.
+    #   centroids_forWhale = centroids[:, whale_index, :]
+    #   entries_have_whale = np.all(centroids_forWhale > 0, axis=1)
+    #   if np.sum(entries_have_whale) == 0:
+    #     continue
+    #   entries_with_whale = np.where(entries_have_whale)[0]
+    #   first_entry_with_whale = entries_with_whale[0]
+    #   last_entry_with_whale = entries_with_whale[-1]
+    #   # Determine the span of frame entries that should be processed for filtering.
+    #   # Will start and end beyond the first and last instance according to the filtering window,
+    #   #   since the span of the filtered version may change based on the filter threshold.
+    #   first_entry_toProcess = max(0, first_entry_with_whale - window_size_preCenter)
+    #   last_entry_toProcess = min(len(masks) - 1, last_entry_with_whale + window_size_postCenter)
+    #   print_ifDesired('    Will process %d frames, from index %d to %d' % (last_entry_toProcess-first_entry_toProcess+1, first_entry_toProcess, last_entry_toProcess))
+    #
+    #   # Determine the span of the image that contains the whale, across all frames.
+    #   bounding_boxes_forWhale = bounding_boxes[:, whale_index, :].reshape((-1, 4, 2))
+    #   x_min = int(np.nanmin(bounding_boxes_forWhale[entries_have_whale, :, 0]))
+    #   x_max = int(np.nanmax(bounding_boxes_forWhale[entries_have_whale, :, 0]))
+    #   y_min = int(np.nanmin(bounding_boxes_forWhale[entries_have_whale, :, 1]))
+    #   y_max = int(np.nanmax(bounding_boxes_forWhale[entries_have_whale, :, 1]))
+    #   x_range = float(x_max - x_min)
+    #   y_range = float(y_max - y_min)
+    #   print_ifDesired('    Will process %d pixels, from (%d, %d) to (%d, %d); a %0.1f reduction factor' % (x_range*y_range, x_min, y_min, x_max, y_max, float(np.prod(masks.shape[2:]))/float(x_range*y_range)))
+    #
+    #   # Load the cropped masks for the active frames into memory.
+    #   print_ifDesired('    Loading cropped masks for this whale... ', {'end': ''})
+    #   t0 = time.time()
+    #   # masks_toFilter = np.zeros((last_entry_toProcess-first_entry_toProcess+1, 1, y_max-y_min+1, x_max-x_min+1), dtype=masks.dtype)
+    #   # masks.read_direct(masks_toFilter, np.s_[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
+    #   # masks_toFilter = np.squeeze(masks_toFilter)
+    #   masks_toFilter = np.squeeze(masks[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
+    #   print_ifDesired('completed in %0.2fs | matrix shape [%d, %d, %d]' % (time.time() - t0, *masks_toFilter.shape))
+    #
+    #   # Compute a fast rolling median.
+    #   # Taking and thresholding the median on a vector of 0 and 1 is equivalent to checking if the mean is above 0.5
+    #   #   and computing a sum is much faster than computing a median.
+    #   # To speed up computing the sum, will store the sum of the current window and then simply
+    #   #   add/subtract the next/previous frame instead of recomputing an entire sum for each window.
+    #   print_ifDesired('    Computing the rolling filter')
+    #   masks_filtered = np.zeros_like(masks_toFilter) # will be the end result
+    #   mask_window_sum = None # the sum of the mask window
+    #   reached_end = False # whether the end of the window has reached the end of the frames
+    #   t0 = time.time()
+    #   last_print_time = t0
+    #   for frame_index in range(masks_toFilter.shape[0]):
+    #     if time.time() - last_print_time > 5 or frame_index == masks_toFilter.shape[0]-1:
+    #       print_ifDesired('      Processing frame index %5d/%d | elapsed time so far: %0.2fs' % (frame_index, masks_toFilter.shape[0]-1, time.time() - t0))
+    #       last_print_time = time.time()
+    #     # Determine the start/end of the current moving window.
+    #     window_start_frame_index = max(0, frame_index - window_size_preCenter)
+    #     window_end_frame_index = min(len(masks_toFilter) - 1, frame_index + window_size_postCenter)
+    #     num_frames_in_sum = (window_end_frame_index - window_start_frame_index + 1)
+    #     # Determine the sum of the masks in the window.
+    #     # If this is the first iteration, compute the sum for the whole window.
+    #     if mask_window_sum is None:
+    #       mask_window_sum = np.sum(masks_toFilter[window_start_frame_index:window_end_frame_index+1, :, :], axis=0)
+    #     # If this is not the first iteration, adjust the previous sum instead of processing the entire window.
+    #     else:
+    #       # If the window has not reached the end of the data, then its end just advanced by one so add that new frame.
+    #       if not reached_end:
+    #         mask_window_sum += masks_toFilter[window_end_frame_index, :, :]
+    #       reached_end = (window_end_frame_index == (len(masks)-1))
+    #       # If the window was not pushed against the start of the data, then its start just advanced by one so subtract the previous frame.
+    #       if window_start_frame_index > 0:
+    #         mask_window_sum -= masks_toFilter[window_start_frame_index-1, :, :]
+    #     # Filter based on the mean!
+    #     frame_filtered = (mask_window_sum/num_frames_in_sum) >= rolling_mean_threshold
+    #     # Store the result in memory.
+    #     masks_filtered[frame_index, :, :] = frame_filtered
+    #   print_ifDesired('    Completed filtering in %0.2fs' % (time.time() - t0))
+    #   print_ifDesired('    Updating the dataset on disk... ', {'end':''})
+    #   t0 = time.time()
+    #   # masks.write_direct(masks_filtered, None, np.s_[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1])
+    #   masks[first_entry_toProcess:last_entry_toProcess+1, whale_index, y_min:y_max+1, x_min:x_max+1] = masks_filtered
+    #   print_ifDesired('completed in %0.2fs' % (time.time() - t0))
+    #   print_ifDesired('    Total elapsed time: %0.2fs' % (time.time() - start_time_s))
+    #
+    # print_ifDesired('  Finished smoothing the whale instance masks')
   
   #################################
   # Video Frames and Visualizations
@@ -1928,10 +2067,15 @@ class Segmentations:
             pass
       # Color the masks.
       if show_masks and self.have_masks():
-        mask = self.get_mask(frame_index=frame_index, whale_index=whale_index)
-        if mask is not None:
+        mask_contours = self.get_mask_contours(frame_index=frame_index, whale_index=whale_index)
+        if mask_contours is not None:
+          whale_color = self._segmentations_colors[whale_index % len(self._segmentations_colors)]
+          whale_color = [int(x) for x in whale_color]
           color_mask = np.zeros_like(img_bgr_annotated)
-          color_mask[mask == 1] = self._segmentations_colors[whale_index % len(self._segmentations_colors)]
+          color_mask = cv2.drawContours(color_mask, mask_contours,
+                                        -1, # -1 means to draw all contours in the given list
+                                        whale_color, # value to fill
+                                        -1) # -1 means fill rather than only outline
           img_bgr_annotated = cv2.addWeighted(img_bgr_annotated, 1, color_mask, mask_alpha, 0)
       # Draw the centroid.
       if show_centroids:
@@ -2025,27 +2169,18 @@ class Segmentations:
     for whale_index in range(self.get_num_whales()):
       # Color the masks.
       if show_masks and self.have_masks():
-        mask = self.get_mask(frame_index=frame_index, whale_index=whale_index)
-        if mask is not None:
-          # # NOTE: Attempted to use findcountours, but sometimes the points seemed to be not ordered correctly to create a polygon.
-          # edges = cv2.Canny(mask, 0, 1)
-          # contours, hierarchy = cv2.findContours(edges,
-          #                         cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-          # for contour in contours:
-          #   coords_xy = np.squeeze(contour)
-          #   # plt.plot(coords_xy[:,0], coords_xy[:,1], '.-', alpha=mask_alpha,
-          #   #        color=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255)
-          #   plt.gca().add_patch(Polygon(
-          #         coords_xy,
-          #         closed=True,
-          #         edgecolor='none',
-          #         facecolor=(0,0,1),#self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255,
-          #         fill=True))
-          coords_yx = np.array(np.where(mask == 1)).T
-          coords_xy = np.fliplr(coords_yx)
-          # TODO compute a polygon boundary rather than just plotting all points?
-          plt.plot(coords_xy[:,0], coords_xy[:,1], 'o', alpha=mask_alpha,
-                   color=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255)
+        mask_contours = self.get_mask_contours(frame_index=frame_index, whale_index=whale_index)
+        if mask_contours is not None:
+          for contour in mask_contours:
+            coords_xy = np.atleast_2d(np.squeeze(contour))
+            # plt.plot(coords_xy[:,0], coords_xy[:,1], '.-', alpha=mask_alpha,
+            #        color=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255)
+            plt.gca().add_patch(Polygon(
+                  coords_xy,
+                  closed=True,
+                  edgecolor='none',
+                  facecolor=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255,
+                  fill=True))
       # Draw the bounding boxes.
       if show_boxes is not None:
         bounding_box_colors = {'full': (0,0,0), 'head': (0,1,1), 'tail':(1,0,1)}
@@ -2203,11 +2338,14 @@ class Segmentations:
   # Cleanup
   ###############################
   
-  def quit(self):
+  def quit(self, num_frames_total=None):
     if self._h5_file is not None:
       if self._writable:
-        # Resize the datasets to remove any extra empty frames or whale indexes.
+        # Resize the datasets to remove any extra empty frames or whale indexes
+        # or to add frames if desired (i.e. if there were no segmentations added for trailing frames in the video).
         num_frames = self.get_max_frame_index_segmented()+1
+        if num_frames_total is not None:
+          num_frames = num_frames_total
         whale_frame_counts = self.get_whale_frame_counts()
         whale_indexes_with_segmentations = np.where(whale_frame_counts > 0)[0]
         if whale_indexes_with_segmentations.size == 0:
@@ -2225,7 +2363,7 @@ class Segmentations:
             whale_dimension = 0
           if dataset_name == 'frames_are_segmented':
             whale_dimension = None
-          # Trim the frame dimension.
+          # Trim (or expand) the frame dimension.
           if frame_dimension is not None:
             new_shape = list(dataset.shape)
             new_shape[frame_dimension] = num_frames
@@ -2250,7 +2388,7 @@ class Segmentations:
     except AttributeError:
       pass # The class probably didn't finish initializing and create the self._ff_procs variable
     
-  def close(self):
+  def close(self, num_frames_total=None):
     self.quit()
 
   def __del__(self):

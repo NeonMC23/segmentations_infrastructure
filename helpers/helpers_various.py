@@ -45,6 +45,8 @@ try:
   have_pyqt = True
 except:
   have_pyqt = False
+  
+from collections import OrderedDict
 
 ############################################
 # TIME
@@ -537,6 +539,33 @@ def falling_edges(x, threshold=0.5, include_first_step_if_low=False, include_las
   if x[-1] > threshold and include_last_step_if_high:
     edges = edges + [len(x)-1]
   return np.array(edges)
+
+############################################
+# Dictionaries
+############################################
+
+# Cast all values in a (possibly nested) dictionary to strings.
+# Will remove key-value pairs for values that cannot be easily converted to a string.
+# If preserve_nested_dicts is True, will preserve nested structure but recursively convert their values.
+#   Otherwise, will simply stringify the whole nested dictionary.
+def convert_dict_values_to_str(d, preserve_nested_dicts=True):
+  # Create a new dictionary that will be populated
+  if isinstance(d, OrderedDict):
+    d_converted = OrderedDict()
+  else:
+    d_converted = {}
+  
+  for (key, value) in d.items():
+    # Recurse if the value is a dictionary
+    if isinstance(value, dict) and preserve_nested_dicts:
+      d_converted[key] = convert_dict_values_to_str(value, preserve_nested_dicts=preserve_nested_dicts)
+    else:
+      # Add the item to the new dictionary if its value is convertible to a string
+      try:
+        d_converted[key] = str(value)
+      except:
+        pass
+  return d_converted
 
 ############################################
 # Math

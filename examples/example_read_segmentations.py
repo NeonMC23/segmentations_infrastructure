@@ -29,8 +29,8 @@ import numpy as np
 import cv2
 import os
 
-from segmentation_infrastructure.Segmentations import Segmentations
-from segmentation_infrastructure.helpers.helpers_various import scale_image
+from csail_data_processing.Segmentations import Segmentations
+from csail_data_processing.helpers.helpers_various import scale_image
 
 #######################################################################
 # Configuration
@@ -40,8 +40,12 @@ current_script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir = os.path.join(current_script_dir, '..', 'data')
 video_num = 1688829151574
 # video_num = 1688830960531
-h5_filepath = os.path.join(data_dir, 'segmentations',
-                           '%013d_segmentations.hdf5' % video_num)
+# h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format',
+#                            '%013d_segmentations.hdf5' % video_num)
+h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format',
+                           # '1688829151574_segmentations_chunkTest16-1-16-1024-2 - Copy.hdf5')
+                           # '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo.hdf5')
+                           '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo_2 - Copy.hdf5')
 
 # If you would not like to read videos, you can just define an empty dictionary:
 # video_filepaths = {}
@@ -74,17 +78,19 @@ frame_shape = segmentations.get_frame_shape()
 print(' See %d total frames' % num_frames)
 print(' See %d frames that were analyzed' % num_frames_segmented)
 print(' See %d maximum whale indexes' % num_whales)
-print(' See a single mask shape of', frame_shape)
+print(' See a frame shape of', frame_shape)
 print()
 
 #######################################################################
 # SEGMENTATION DATA OPTION 1: Get data for all frames.
 #
-# masks will be NxIxHxW
+# masks will be NxIxCxPx2
 #   N is the number of frames
 #   I is the maximum number of whales
-#   HxW is the resolution of the video frame corresponding to the mask
-#   An entry at mask[frame_index, whale_index, y, x] is 0 or 1 indicating whether the whale is in that pixel
+#   C is the maximum number of contours per whale
+#   P is the maximum number of points per contour
+#   2 is [x, y] of the point on the contour
+#   Entries that are unused for a frame/whale/contour/point will be [np.nan, np.nan]
 #
 # There are multiple bounding boxes per whale, with keys 'full', 'head', and 'tail'.
 # For each one, bounding_boxes_4xy will be NxIx8
@@ -131,12 +137,12 @@ bounding_box_keys = segmentations.get_bounding_box_keys() # get the available ty
 bounding_box_key = 'full'
 
 # Get all masks.
-# The entire matrix would be too large to fit in memory, so this will return
+# The entire matrix might be large, so this will return
 #   an h5py Dataset instead of a numpy array.
 #   It can be used just like a numpy array, so you don't need to worry about it,
 #   but the data will be kept on disk instead of being loaded into memory.
 if segmentations.have_masks(): # filtered versions of the data may not have masks
-  masks = segmentations.get_all_masks()
+  all_masks_contours = segmentations.get_all_masks_contours()
 
 # Get all bounding boxes of the desired type.
 # Will a numpy array loaded into memory.
@@ -165,7 +171,7 @@ whale_ids = segmentations.get_whale_ids()
 
 print(' See the following matrix shapes')
 if segmentations.have_masks(): # filtered versions of the data may not have masks
-  print('  masks: type %s of %s | shape' % (type(masks), masks.dtype), masks.shape)
+  print('  mask contours: type %s of %s | shape' % (type(all_masks_contours), all_masks_contours.dtype), all_masks_contours.shape)
 print('  bounding_boxes_4xy: type %s of %s | shape' % (type(bounding_boxes_4xy), bounding_boxes_4xy.dtype), bounding_boxes_4xy.shape)
 print('  bounding_boxes_4xy_reshaped: type %s of %s | shape' % (type(bounding_boxes_4xy_reshaped), bounding_boxes_4xy_reshaped.dtype), bounding_boxes_4xy_reshaped.shape)
 print('  centroids_xy: type %s of %s | shape' % (type(centroids_xy), centroids_xy.dtype), centroids_xy.shape)
@@ -182,10 +188,15 @@ frame_index = 3
 whale_index = 1
 
 if segmentations.have_masks(): # filtered versions of the data may not have masks
-  # Get the mask for this whale and frame; will have 1s where the whale is present in the frame.
-  frame_mask_forWhale = masks[frame_index, whale_index, :,:]
+  # Get the mask contours for this whale and frame.
+  # Will be CxPx2 where C is contour, P is point on contour, and 2 is [x,y].
+  # Unused entries will be np.nan.
+  frame_mask_contours_forWhale = all_masks_contours[frame_index, whale_index, :,:,:]
+  # Convert the contour representation to a dense representation,
+  #  which has a shape matching the frame shape and has 0s and 1s indicating segmentation presence.
+  frame_mask_forWhale = segmentations.convert_mask_contours_to_dense_mask(frame_mask_contours_forWhale)
   # Get the masks for all whales for this frame.
-  frame_masks_allWhales = np.squeeze(masks[frame_index, :, :,:])
+  frame_masks_contours_allWhales = np.squeeze(all_masks_contours[frame_index, :, :,:,:])
 
 # Get the bounding box of this whale in this frame; will be all np.nan if the whale is not present.
 bounding_box_4xy = bounding_boxes_4xy[frame_index, whale_index, :]
@@ -217,7 +228,8 @@ whale_segmentations_exist_forWhale = segmentations.whale_segmentation_exists(wha
 print()
 print(' See the following sample matrices for frame index %d and whale index %d' % (frame_index, whale_index))
 if segmentations.have_masks(): # filtered versions of the data may not have masks
-  print(' frame_mask_forWhale:', frame_mask_forWhale)
+  print(' frame_mask_contours_forWhale (shape %s):' % (frame_mask_contours_forWhale.shape,), frame_mask_contours_forWhale)
+  print(' frame_mask_forWhale (shape %s):' % (frame_mask_forWhale.shape,), frame_mask_forWhale)
 print(' bounding_box_4xy', bounding_box_4xy, ' (is valid? %d)' % bounding_box_is_valid)
 print(' centroid_xy', centroid_xy, ' (is valid? %d)' % centroid_is_valid)
 print(' orientation_rad', orientation_rad, 'orientation_confidence', orientation_confidence, ' (is valid? %d)' % orientation_is_valid)
@@ -242,10 +254,10 @@ whale_is_present = whale_segmentations_exist[frame_index, whale_index]
 
 # Get the desired mask.
 if segmentations.have_masks(): # filtered versions of the data may not have masks
-  frame_mask_forWhale = segmentations.get_mask(frame_index=frame_index, whale_index=whale_index)
-  frame_masks_allWhales = segmentations.get_masks(frame_index=frame_index) # can return a matrix, or a dict mapping whale index to mask
-  frame_masks_allWhales_dict = segmentations.get_masks(frame_index=frame_index,
-                                                       as_dict=True) # can return a matrix, or a dict mapping whale index to mask
+  frame_mask_contours_forWhale = segmentations.get_mask_contours(frame_index=frame_index, whale_index=whale_index)
+  frame_masks_contours_allWhales = segmentations.get_masks_contours(frame_index=frame_index) # can return a matrix, or a dict mapping whale index to mask contours
+  frame_masks_contours_allWhales_dict = segmentations.get_masks_contours(frame_index=frame_index,
+                                                                         as_dict=True) # can return a matrix, or a dict mapping whale index to mask
 
 # Get the bounding box of this whale in this frame, and check if the segmentation existed in this frame.
 bounding_box_4xy = segmentations.get_bounding_box_4xy(bounding_box_key=bounding_box_key, frame_index=frame_index, whale_index=whale_index)
@@ -274,10 +286,11 @@ orientations_rad_confidence_allWhales_dict = segmentations.get_orientations_rad_
 
 print(' See the following matrix shapes for frame index %d and whale index %d' % (frame_index, whale_index))
 if segmentations.have_masks(): # filtered versions of the data may not have masks
-  print('  frame_mask_forWhale: ', frame_mask_forWhale.shape)
-  print('  frame_masks_allWhales: ', frame_masks_allWhales.shape)
-  print('  frame_masks_allWhales_dict: dict len %d with entry 1 shape' % len(frame_masks_allWhales_dict),
-        frame_masks_allWhales_dict[1].shape if frame_masks_allWhales_dict[1] is not None else None)
+  print('  frame_mask_contours_forWhale: len %d with each entry %s ' % (len(frame_mask_contours_forWhale), frame_mask_contours_forWhale[0].shape))
+  print('  frame_masks_contours_allWhales: ', frame_masks_contours_allWhales.shape)
+  print('  frame_masks_contours_allWhales_dict: dict len %d with entry 1 len %d and shape %s' % (len(frame_masks_contours_allWhales_dict),
+        len(frame_masks_contours_allWhales_dict[1]) if frame_masks_contours_allWhales_dict[1] is not None else None,
+        frame_masks_contours_allWhales_dict[1][0].shape if frame_masks_contours_allWhales_dict[1] is not None else None))
 print('  bounding_box_4xy: ', bounding_box_4xy.shape if bounding_box_4xy is not None else None)
 print('  bounding_box_4xy_reshaped: ', bounding_box_4xy_reshaped.shape if bounding_box_4xy_reshaped is not None else None)
 print('  bounding_boxes_4xy_allWhales: ', bounding_boxes_4xy_allWhales.shape)
@@ -294,8 +307,6 @@ print('  orientations_rad_confidence_allWhales_dict: dict len %d with entry 1 ty
       type(orientations_rad_confidence_allWhales_dict[1]) if orientations_rad_confidence_allWhales_dict[1] is not None else None)
 print()
 print(' See the following sample matrices for frame index %d and whale index %d' % (frame_index, whale_index))
-if segmentations.have_masks(): # filtered versions of the data may not have masks
-  print(' frame_mask_forWhale:', frame_mask_forWhale)
 print(' bounding_box_4xy', bounding_box_4xy)
 print(' centroid_xy', centroid_xy)
 print(' orientation_rad', orientation_rad)
@@ -328,11 +339,11 @@ print()
 
 # Remove all masks from the data.
 
-print('-'*50)
-print('Removing all masks from a copy of the data')
-
-segmentations_copy.remove_masks_dataset()
-print()
+# print('-'*50)
+# print('Removing all masks from a copy of the data')
+#
+# segmentations_copy.remove_masks_dataset()
+# print()
 
 #######################################################################
 # FILTER AND SMOOTH WHALE INSTANCES
@@ -354,7 +365,7 @@ segmentations_filtered = segmentations_copy.filter_whale_instances_byCount(
     min_frame_count=whale_frame_count_threshold,
     # Specify whether to remove the masks dataset from the HDF5 file.
     # If False, will filter the masks.  This can be slow.
-    remove_masks_dataset=True,
+    remove_masks_dataset=False,
     # Specify whether to create a new HDF5 file for the results.
     # If True, will return a Segmentations object for the new HDF5 file.
     # If False, will edit the current HDF5 file (and return None).
@@ -372,25 +383,6 @@ print()
 
 print('-'*50)
 print('Smoothing whale instances')
-
-# print('-'*50)
-# print('Smoothing the whale instance masks using a rolling window')
-# # Edit the current segmentations to have smoothed masks.  Segmentations must be opened as writable.
-# # NOTE: Will edit the current HDF5 file, so you should first copy the file if you want a backup of the original data.
-# # For each pixel of each frame, will compute the mean of the masks from window_size_preCenter frames before it
-# #  through window_size_postCenter frames after it.
-# #  That pixel will be 1 if the mean is at least rolling_mean_threshold, and 0 otherwise.
-# segmentations_copy.smooth_masks(
-#     # Specify the rolling window size and centering.
-#     window_size_preCenter=20, window_size_postCenter=20,
-#     # Specify the threshold to use on the rolling mean at each pixel.
-#     # NOTE: If it is set to 0.5, the filter effectively becomes a rolling median filter.
-#     rolling_mean_threshold=0.5,
-#     # If desired, only smooth specified whale indexes.
-#     whale_indexes_toSmooth='all',
-#     # Print status updates.
-#     print_status=True)
-# smoothed_masks = segmentations_copy.get_all_masks()
 
 print()
 print('Smoothing the centroids using a rolling window')
@@ -456,13 +448,63 @@ smoothed_orientations_confidence = smoothed_orientations_rad_confidence[:, :, 1]
 print()
 
 #######################################################################
+# EDIT SEGMENTATIONS
+#######################################################################
+
+frame_indexes_to_edit = np.arange(10, 500+1)
+frame_indexes_to_edit = np.arange(10, 1200+1)
+
+import time
+
+print('-'*50)
+print('Removing whale index 3 from the copied segmentations between frames [%d, %d]' % (frame_indexes_to_edit[0], frame_indexes_to_edit[-1]))
+t0 = time.time()
+segmentations_copy.remove_segmentation(whale_index=3,
+                                       frame_index_start=frame_indexes_to_edit[0],
+                                       frame_index_end=frame_indexes_to_edit[-1],
+                                       print_status=True)
+print('Completed in %0.2fs' % (time.time() - t0))
+
+print()
+print('Removing whale index 4 entirely from the copied segmentations')
+t0 = time.time()
+segmentations_copy.remove_whale_indexes(whale_indexes_toRemove=[4], print_status=False)
+print('Completed in %0.2fs' % (time.time() - t0))
+
+print()
+print('Swapping segmentations for whales 4 and 5 for the copied segmentations between frames [%d, %d]' % (frame_indexes_to_edit[0], frame_indexes_to_edit[-1]))
+t0 = time.time()
+segmentations_copy.swap_whale_indexes(whale_index_1=4, whale_index_2=5,
+                                      frame_index_start=frame_indexes_to_edit[0],
+                                      frame_index_end=frame_indexes_to_edit[-1],
+                                      swap_whale_ids=False)
+print('Completed in %0.2fs' % (time.time() - t0))
+
+print()
+print('Changing whale index 6 to index 7 for the copied segmentations between frames [%d, %d]' % (frame_indexes_to_edit[0], frame_indexes_to_edit[-1]))
+t0 = time.time()
+segmentations_copy.change_whale_index(whale_index_source=2, whale_index_destination=7,
+                                      frame_index_start=frame_indexes_to_edit[0],
+                                      frame_index_end=frame_indexes_to_edit[-1])
+print('Completed in %0.2fs' % (time.time() - t0))
+
+print()
+print('Moving whale index 2 to a new index for the copied segmentations between frames [%d, %d]' % (frame_indexes_to_edit[0], frame_indexes_to_edit[-1]))
+t0 = time.time()
+segmentations_copy.move_to_new_whale_index(whale_index_toMove=1,
+                                           frame_index_start=frame_indexes_to_edit[0],
+                                           frame_index_end=frame_indexes_to_edit[-1],
+                                           new_whale_id='')
+print('Completed in %0.2fs' % (time.time() - t0))
+
+#######################################################################
 # VIDEO DATA AND VISUALIZATIONS
 
 # Get video frames, optionally annotated with segmentation visualizations.
 # Can also visualize segmentations on black images if no videos are handy.
 
 # A returned frame will be HxWx3, where the 3 channels are in RGB order.
-# NOTE: H may be slightly greater than the H of the mask and the original drone video,
+# NOTE: H may be slightly greater than the H of the mask frame shape and the original drone video,
 #  since the MP4 encoding format requires that dimensions are even.
 #  For the current segmentation outputs, the drone videos have a height of 1407 so the encoding
 #   pads it by adding a row of black pixels at the bottom.
@@ -563,7 +605,7 @@ print('Visualizing segmentations on a graph')
 
 fig = segmentations.visualize_segmentations(frame_index=frame_index_toFetch,
                                             graph=True, fig=None,
-                                            show_masks=False,
+                                            show_masks=True,
                                             show_centroids=True,
                                             show_orientations=True,
                                             show_boxes=['full', 'head', 'tail'],
