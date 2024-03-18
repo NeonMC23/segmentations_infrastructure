@@ -40,12 +40,8 @@ current_script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir = os.path.join(current_script_dir, '..', 'data')
 video_num = 1688829151574
 # video_num = 1688830960531
-# h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format',
-#                            '%013d_segmentations.hdf5' % video_num)
-h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format',
-                           # '1688829151574_segmentations_chunkTest16-1-16-1024-2 - Copy.hdf5')
-                           # '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo.hdf5')
-                           '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo_2 - Copy.hdf5')
+h5_filepath = os.path.join(data_dir, 'segmentations',
+                           '%013d_segmentations.hdf5' % video_num)
 
 # If you would not like to read videos, you can just define an empty dictionary:
 # video_filepaths = {}

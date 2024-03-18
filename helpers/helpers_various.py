@@ -272,7 +272,7 @@ duration_s_scaleImage = 0
 def get_duration_s_scaleImage():
   global duration_s_scaleImage
   return duration_s_scaleImage
-def scale_image(img, target_width, target_height, maintain_aspect_ratio=True):
+def scale_image(img, target_width, target_height=None, maintain_aspect_ratio=True):
   global duration_s_scaleImage
   t0 = time.time()
   # Scale a numpy array.

@@ -137,7 +137,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='int',
                                                                      fillvalue=-1,
-                                                                     chunks=(64,1,16,1024,2),
+                                                                     chunks=(32,1,16,1024,2),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key in self._bounding_box_names and self._writable and not using_existing_file:
@@ -148,7 +148,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='float',
                                                                      fillvalue=np.nan,
-                                                                     chunks=(64,64,8),
+                                                                     chunks=(32,64,8),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'centroids_xy' and self._writable and not using_existing_file:
@@ -159,7 +159,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='float',
                                                                      fillvalue=np.nan,
-                                                                     chunks=(64,64,2),
+                                                                     chunks=(32,64,2),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'orientations_rad_confidence' and self._writable and not using_existing_file:
@@ -170,7 +170,7 @@ class Segmentations:
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='float',
                                                                      fillvalue=np.nan,
-                                                                     chunks=(64,64,2),
+                                                                     chunks=(32,64,2),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
         elif dataset_key == 'frames_are_segmented' and self._writable and not using_existing_file:
@@ -200,7 +200,7 @@ class Segmentations:
                                                                      matrix_shape,
                                                                      maxshape=max_matrix_shape,
                                                                      dtype='S128',
-                                                                     chunks=(64,1),
+                                                                     chunks=(32,1),
                                                                      compression='gzip',
                                                                      compression_opts=self._h5_compression_level) # 0-9, default is 4
     
@@ -460,6 +460,34 @@ class Segmentations:
       return whale_ids.index(whale_id)
     except ValueError:
       return None
+  
+  # Get the next frame index with a segmentation.
+  def get_next_frame_index_with_whale_segmentation(self, frame_index, whale_index):
+    whale_segmentations_exist = self.get_whale_segmentations_exist()[:, whale_index]
+    future_frame_indexes_with_whale = np.where(whale_segmentations_exist[frame_index+1:])[0]
+    if future_frame_indexes_with_whale.size == 0:
+      return None
+    return future_frame_indexes_with_whale[0] + frame_index + 1
+  
+  # Get the previous frame index with a segmentation.
+  def get_previous_frame_index_with_whale_segmentation(self, frame_index, whale_index):
+    whale_segmentations_exist = self.get_whale_segmentations_exist()[:, whale_index]
+    previous_frame_indexes_with_whale = np.where(whale_segmentations_exist[0:frame_index])[0]
+    if previous_frame_indexes_with_whale.size == 0:
+      return None
+    return previous_frame_indexes_with_whale[-1]
+  
+  # Get the frame bounds for the current instance of a whale segmentation.
+  def get_frame_bounds_for_whale_segmentations(self, frame_index, whale_index):
+    whale_segmentations_exist = self.get_whale_segmentations_exist()[:, whale_index]
+    if not whale_segmentations_exist[frame_index]:
+      return None
+    previous_frame_indexes_without_whale = np.where(~whale_segmentations_exist[0:frame_index])[0]
+    next_frame_indexes_without_whale = np.where(~whale_segmentations_exist[frame_index+1:])[0]
+    segmentation_start_frame_index = previous_frame_indexes_without_whale[-1]+1
+    segmentation_end_frame_index = next_frame_indexes_without_whale[0]-1
+    return (segmentation_start_frame_index, segmentation_end_frame_index)
+    
   
   ###############################
   # Dataset management helpers
