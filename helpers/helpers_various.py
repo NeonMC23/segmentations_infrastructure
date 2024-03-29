@@ -58,7 +58,19 @@ from collections import OrderedDict
 # For example, for Eastern Daylight Time which is UTC-4:
 #   timezone_offset_s = -14400
 #   timezone_offset_str = '-0400'
-def time_s_to_str(time_s, timezone_offset_s=0, timezone_offset_str=''):
+def time_s_to_str(time_s, timezone_offset_s=None, timezone_offset_str=None,
+                  use_current_local_time=True, use_current_utc_time=False):
+  # Use the local timezone if none was provided.
+  if timezone_offset_s is None:
+    if use_current_utc_time:
+      timezone_offset_s = 0
+      timezone_offset_str = None
+    elif use_current_local_time:
+      is_dst = time.daylight and time.localtime().tm_isdst > 0
+      timezone_offset_s = -(time.altzone if is_dst else time.timezone)
+      timezone_offset_str = None
+  if timezone_offset_str is None:
+    timezone_offset_str = '%s%02d%02d' % ('-' if timezone_offset_s < 0 else '', int(abs(timezone_offset_s)/3600), int((abs(timezone_offset_s) % 3600)/60))
   # Get "UTC" time, which is actually local time because we will do the timezone offset first.
   time_datetime = datetime.utcfromtimestamp(time_s + timezone_offset_s)
   # Format the string then add the local offset string.
@@ -346,29 +358,39 @@ def draw_text_on_image(img_bgr, text, pos=(0, 0),
   global duration_s_drawText
   t0 = time.time()
   # If desired, compute a font scale based on the target width ratio.
+  font_scale_byWidthRatio = None
+  font_scale_byHeightRatio = None
   if font_scale is None and text_width_ratio is not None:
     if len(text) > 0:
       target_text_w = text_width_ratio * img_bgr.shape[1]
-      font_scale = 0
+      font_scale_byWidthRatio = 0
       text_w = 0
       while text_w < target_text_w:
-        font_scale += 0.2
-        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
-      font_scale -= 0.2
+        font_scale_byWidthRatio += 0.2
+        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale_byWidthRatio, font_thickness)
+      font_scale_byWidthRatio -= 0.2
     else:
-      font_scale = 1
+      font_scale_byWidthRatio = 1
   # If desired, compute a font scale based on the target height ratio.
   if font_scale is None and text_height_ratio is not None:
     if len(text) > 0:
       target_text_h = text_height_ratio * img_bgr.shape[0]
-      font_scale = 0
+      font_scale_byHeightRatio = 0
       text_h = 0
       while text_h < target_text_h:
-        font_scale += 0.2
-        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
-      font_scale -= 0.2
+        font_scale_byHeightRatio += 0.2
+        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale_byHeightRatio, font_thickness)
+      font_scale_byHeightRatio -= 0.2
     else:
-      font_scale = 1
+      font_scale_byHeightRatio = 1
+  # If both ratios were provided, use the smaller font.
+  if font_scale is None:
+    if font_scale_byHeightRatio is not None and font_scale_byWidthRatio is not None:
+      font_scale = min(font_scale_byHeightRatio, font_scale_byWidthRatio)
+    elif font_scale_byHeightRatio is not None:
+      font_scale = font_scale_byHeightRatio
+    elif font_scale_byWidthRatio is not None:
+      font_scale = font_scale_byWidthRatio
   # Compute the text dimensions.
   (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
   # Compute padding.
@@ -410,6 +432,16 @@ def draw_text_on_image(img_bgr, text, pos=(0, 0),
   
   duration_s_drawText += time.time() - t0
   return (text_w, text_h, font_scale, (x, y))
+
+# Rotate an image by a given angle.
+# Source: https://stackoverflow.com/a/47248339
+def rotate_image(img, angle_rad):
+  size_reverse = np.array(img.shape[1::-1]) # swap x with y
+  M = cv2.getRotationMatrix2D(tuple(size_reverse / 2.), np.degrees(angle_rad), 1.)
+  MM = np.absolute(M[:,:2])
+  size_new = MM @ size_reverse
+  M[:,-1] += (size_new - size_reverse) / 2.
+  return cv2.warpAffine(img, M, tuple(size_new.astype(int)))
 
 # Compress a video to the target bitrate.
 # The target bitrate in bits per second will include both video and audio.
@@ -541,7 +573,7 @@ def falling_edges(x, threshold=0.5, include_first_step_if_low=False, include_las
   return np.array(edges)
 
 ############################################
-# Dictionaries
+# Printing and Formatting Variables
 ############################################
 
 # Cast all values in a (possibly nested) dictionary to strings.
@@ -566,6 +598,72 @@ def convert_dict_values_to_str(d, preserve_nested_dicts=True):
       except:
         pass
   return d_converted
+
+# Print a dictionary (recursively as appropriate).
+def print_dict(d, level=0):
+  print(get_dict_str(d, level=level))
+
+# Get a string to display a dictionary (recursively as appropriate).
+def get_dict_str(d, level=0):
+  indent_root = ' '*level
+  indent_keys =  indent_root + ' '
+  msg = '%s{\n' % indent_root
+  for (key, value) in d.items():
+    msg += '%s %s: ' % (indent_keys, key)
+    if isinstance(value, dict):
+      msg += '\n'
+      msg += get_dict_str(value, level+2) # one level for the key indent, one for advancing the level
+    else:
+      msg += '%s\n' % str(value)
+  msg += '%s}\n' % indent_root
+  return msg
+
+# Print a variable and its type.
+def print_var(var, name=None):
+  print(get_var_str(var, name=name))
+
+# Get a string to display a variable and its type.
+def get_var_str(var, name=None):
+  msg = ''
+  if name is not None:
+    msg += 'Variable "%s" of ' % name
+  msg += 'Type %s: ' % type(var)
+  msg += ''
+  processed_var = False
+  # Dictionary
+  if isinstance(var, dict):
+    msg += get_dict_str(var, level=3)
+    processed_var = True
+  # String
+  if isinstance(var, str):
+    msg += '"%s"' % var
+    processed_var = True
+  # Numpy array, if numpy has been imported
+  try:
+    if isinstance(var, np.ndarray):
+      msg += '\n shape: %s' % str(var.shape)
+      msg += '\n data type: %s' % str(var.dtype)
+      msg += '\n %s' % str(var)
+      processed_var = True
+  except NameError:
+    pass
+  # Lists and tuples
+  if isinstance(var, (list, tuple)):
+    contains_non_numbers = False in [isinstance(x, (int, float)) for x in var]
+    if contains_non_numbers:
+      msg += '['
+      for (i, x) in enumerate(var):
+        msg += '\n %d: %s' % (i, get_var_str(x))
+      msg += '\n ]'
+    else:
+      msg += '%s' % str(var)
+    processed_var = True
+  # Everything else
+  if not processed_var:
+    msg += '%s' % str(var)
+    processed_var = True
+  # Done!
+  return msg.strip()
 
 ############################################
 # Math

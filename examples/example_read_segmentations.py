@@ -29,8 +29,8 @@ import numpy as np
 import cv2
 import os
 
-from csail_data_processing.Segmentations import Segmentations
-from csail_data_processing.helpers.helpers_various import scale_image
+from segmentation_infrastructure.Segmentations import Segmentations
+from segmentation_infrastructure.helpers.helpers_various import *
 
 #######################################################################
 # Configuration
@@ -42,6 +42,12 @@ video_num = 1688829151574
 # video_num = 1688830960531
 h5_filepath = os.path.join(data_dir, 'segmentations',
                            '%013d_segmentations.hdf5' % video_num)
+# h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format_chunked32',
+#                            '%013d_segmentations.hdf5' % video_num)
+# h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format',
+#                            # '1688829151574_segmentations_chunkTest16-1-16-1024-2 - Copy.hdf5')
+#                            # '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo.hdf5')
+#                            '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo_2 - Copy.hdf5')
 
 # If you would not like to read videos, you can just define an empty dictionary:
 # video_filepaths = {}
@@ -310,6 +316,28 @@ print(' orientation_confidence', orientation_confidence)
 print()
 
 ###############################
+# Annotations
+###############################
+
+print('-'*50)
+print('Getting annotations and the edit history')
+
+annotations_whale_ids = segmentations.get_annotations_whale_ids()
+annotations_behaviors = segmentations.get_annotations_behaviors()
+annotations_notes = segmentations.get_annotations_notes()
+history_log = segmentations.get_history()
+
+print(' See the following annotations of whale IDs:')
+print_dict(annotations_whale_ids, level=1)
+print(' See the following annotations of whale behaviors:')
+print_dict(annotations_behaviors, level=1)
+print(' See the following annotations of general notes:')
+print_dict(annotations_notes, level=1)
+print(' See the following history of the HDF5 file:')
+print_dict(history_log, level=1)
+print()
+
+###############################
 # File operations
 ###############################
 
@@ -352,7 +380,8 @@ print('-'*50)
 print('Filtering the whale instances based on their frame count')
 
 whale_frame_count_threshold = 150
-
+import time
+t0 = time.time()
 segmentations_filtered = segmentations_copy.filter_whale_instances_byCount(
     # Specify the threshold for how many frames a whale instance should be present.
     # Heuristically, 150 seems to work fairly well.
@@ -371,6 +400,7 @@ segmentations_filtered = segmentations_copy.filter_whale_instances_byCount(
 
 num_whales_filtered = segmentations_filtered.get_num_whales()
 print('See %d whales after filtering with a frame count threshold of %d' % (num_whales_filtered, whale_frame_count_threshold))
+print(time.time() - t0)
 print()
 
 #######################################################################
@@ -489,8 +519,7 @@ print('Moving whale index 2 to a new index for the copied segmentations between 
 t0 = time.time()
 segmentations_copy.move_to_new_whale_index(whale_index_toMove=1,
                                            frame_index_start=frame_indexes_to_edit[0],
-                                           frame_index_end=frame_indexes_to_edit[-1],
-                                           new_whale_id='')
+                                           frame_index_end=frame_indexes_to_edit[-1])
 print('Completed in %0.2fs' % (time.time() - t0))
 
 #######################################################################
@@ -640,8 +669,10 @@ plt.show(block=True)
 print()
 print('-'*50)
 print('Closing the files')
+print('Also trimming datasets and removing unused whale indexes in the copied file')
 segmentations.close()
-segmentations_copy.close()
+segmentations_copy.close(resize_frame_dimension=True, num_frames_total=segmentations_copy.get_num_frames_total(),
+                         resize_whale_dimension=True, remove_unused_whale_indexes=True)
 segmentations_filtered.close()
 
 print()
