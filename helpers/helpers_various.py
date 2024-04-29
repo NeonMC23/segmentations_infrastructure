@@ -202,16 +202,22 @@ def load_image(filepath, target_width=None, target_height=None, method='pil'):
   img = None
   if method.lower() == 'opencv':
     img = cv2.imread(filepath)
-    if target_width is not None and target_height is not None:
-      img = scale_image(img, target_width=target_width, target_height=target_height)
+    if target_width is not None or target_height is not None:
+      img = scale_image(img, target_width=target_width, target_height=target_height, maintain_aspect_ratio=True)
   elif method.lower() == 'pil':
     img = Image.open(filepath)
+    if target_width is not None and target_height is None:
+      (img_width, img_height) = img.size
+      target_height = int(target_width * img_height/img_width)
+    if target_width is None and target_height is not None:
+      (img_width, img_height) = img.size
+      target_width = int(target_height * img_width/img_height)
     if target_width is not None and target_height is not None:
       img.draft('RGB', (int(target_width), int(target_height)))
       #print('target:', (target_width, target_height), '  drafted:', img.size, os.path.basename(filepath))
     img = np.asarray(img)
-    if target_width is not None and target_height is not None:
-      img = scale_image(img, target_width=target_width, target_height=target_height)
+    if target_width is not None or target_height is not None:
+      img = scale_image(img, target_width=target_width, target_height=target_height, maintain_aspect_ratio=True)
   return img
 
 # Open a video file.
@@ -284,7 +290,7 @@ duration_s_scaleImage = 0
 def get_duration_s_scaleImage():
   global duration_s_scaleImage
   return duration_s_scaleImage
-def scale_image(img, target_width, target_height=None, maintain_aspect_ratio=True):
+def scale_image(img, target_width=None, target_height=None, maintain_aspect_ratio=True):
   global duration_s_scaleImage
   t0 = time.time()
   # Scale a numpy array.
@@ -312,6 +318,11 @@ def scale_image(img, target_width, target_height=None, maintain_aspect_ratio=Tru
       return res
     else:
       # If not maintaining the aspect ratio, scale each dimension by its computed factor.
+      # If one of the dimensions was not provided, assume it should be kept at the original size.
+      if scale_factor_byWidth is None:
+        scale_factor_byWidth = 1
+      if scale_factor_byHeight is None:
+        scale_factor_byHeight = 1
       if scale_factor_byWidth != 1 or scale_factor_byHeight != 1:
         res = cv2.resize(src=img, dsize=(0,0), fx=scale_factor_byWidth, fy=scale_factor_byHeight)
       else:

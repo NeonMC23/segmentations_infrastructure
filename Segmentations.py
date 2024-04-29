@@ -276,6 +276,8 @@ class Segmentations:
     # Store a copy of the existence matrix in memory
     #  to significantly speed up checks later when shortcutting work.
     self._whale_segmentations_exist = self.get_whale_segmentations_exist()
+    # Similarly, store a copy of the whale IDs in memory.
+    self._whale_ids = self.get_whale_ids(use_local_copy=False)
     
     # Store the number of frames.
     self._num_frames = 0
@@ -608,7 +610,7 @@ class Segmentations:
       return None
     annotation_info = {}
     for key in ['ids', 'notes', 'authors', 'timestamps_str']:
-      annotation_info[key] = [value[0].decode('utf-8') for value in self._datasets['annotations']['whale_ids'][key]]
+      annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['whale_ids'][key]])
     for key in ['confidences', 'source_points_xy', 'source_frame_bounds', 'timestamps_s']:
       annotation_info[key] = np.array(self._datasets['annotations']['whale_ids'][key])
     annotation_info['whale_index'] = np.arange(0, len(annotation_info['timestamps_s']))
@@ -632,7 +634,7 @@ class Segmentations:
       return None
     annotation_info = {}
     for key in ['notes', 'authors', 'timestamps_str']:
-      annotation_info[key] = [value[0].decode('utf-8') for value in self._datasets['annotations']['notes'][key]]
+      annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['notes'][key]])
     for key in ['frame_bounds', 'whales_involved', 'points_xy', 'timestamps_s']:
       annotation_info[key] = np.array(self._datasets['annotations']['notes'][key])
     annotation_info['annotation_index'] = np.arange(0, len(annotation_info['timestamps_s']))
@@ -656,7 +658,7 @@ class Segmentations:
       return None
     annotation_info = {}
     for key in ['behaviors', 'notes', 'authors', 'timestamps_str']:
-      annotation_info[key] = [value[0].decode('utf-8') for value in self._datasets['annotations']['behaviors'][key]]
+      annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['behaviors'][key]])
     for key in ['frame_bounds', 'whales_involved', 'points_xy', 'confidences', 'timestamps_s']:
       annotation_info[key] = np.array(self._datasets['annotations']['behaviors'][key])
     annotation_info['annotation_index'] = np.arange(0, len(annotation_info['timestamps_s']))
@@ -680,7 +682,7 @@ class Segmentations:
       return None
     annotation_info = {}
     for key in ['events', 'notes', 'authors', 'timestamps_str']:
-      annotation_info[key] = [value[0].decode('utf-8') for value in self._datasets['annotations']['events'][key]]
+      annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['events'][key]])
     for key in ['frame_bounds', 'whales_involved', 'points_xy', 'confidences', 'timestamps_s']:
       annotation_info[key] = np.array(self._datasets['annotations']['events'][key])
     annotation_info['annotation_index'] = np.arange(0, len(annotation_info['timestamps_s']))
@@ -704,15 +706,17 @@ class Segmentations:
       return None
     history_info = {}
     for key in ['summaries', 'details', 'authors', 'timestamps_str']:
-      history_info[key] = [value[0].decode('utf-8') for value in self._datasets['history'][key]]
+      history_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['history'][key]])
     for key in ['timestamps_s']:
       history_info[key] = np.array(self._datasets['history'][key])
     return history_info
   
   # Get the whale ID mapping.
-  def get_whale_ids(self):
+  def get_whale_ids(self, use_local_copy=True):
+    if use_local_copy:
+      return self._whale_ids
     if self._h5_file is not None:
-      return [whale_id[0].decode('utf-8') for whale_id in self._datasets['annotations']['whale_ids']['ids']]
+      return self._decode_utf8_values([whale_id[0] for whale_id in self._datasets['annotations']['whale_ids']['ids']])
     return None
   
   # Get the whale ID for a specific whale index.
@@ -744,13 +748,19 @@ class Segmentations:
     self._h5_file['annotations']['whale_ids']['confidences'][whale_index] = confidence
     self._h5_file['annotations']['whale_ids']['notes'][whale_index] = notes
     self._h5_file['annotations']['whale_ids']['source_frame_bounds'][whale_index, :] = frame_bounds if frame_bounds is not None else -1
-    self._h5_file['annotations']['whale_ids']['source_points_xy'][whale_index, :, :] = np.array(points) if points is not None else -1
+    if points is not None:
+      points = np.array(points)
+      self._h5_file['annotations']['whale_ids']['source_points_xy'][whale_index, 0:points.shape[0], :] = points
+    else:
+      self._h5_file['annotations']['whale_ids']['source_points_xy'][whale_index, :, :] = -1
     timestamp_s = timestamp_s if timestamp_s is not None else time.time()
     self._h5_file['annotations']['whale_ids']['timestamps_s'][whale_index] = timestamp_s
     self._h5_file['annotations']['whale_ids']['timestamps_str'][whale_index] = time_s_to_str(timestamp_s, use_current_utc_time=True)
     self._h5_file['annotations']['whale_ids']['authors'][whale_index] = author
     # Update the date modified.
     self._update_metadata_dateModified(segmentations=False, annotations=True)
+    # Update the local copy of the whale IDs.
+    self._whale_ids = self.get_whale_ids(use_local_copy=False)
   
   # Add a behavior annotation.
   def add_annotation_behavior(self, behavior, frame_bounds, whale_indexes_involved, confidence=np.nan, notes='', points=None, timestamp_s=None, author='',
@@ -786,7 +796,11 @@ class Segmentations:
     self._h5_file['annotations']['behaviors']['whales_involved'][annotation_index, whale_indexes_involved] = 1
     self._h5_file['annotations']['behaviors']['confidences'][annotation_index] = confidence
     self._h5_file['annotations']['behaviors']['notes'][annotation_index] = notes
-    self._h5_file['annotations']['behaviors']['points_xy'][annotation_index, 0:len(points), :] = np.array(points) if points is not None else -1
+    if points is not None:
+      points = np.array(points)
+      self._h5_file['annotations']['behaviors']['points_xy'][annotation_index, 0:points.shape[0], :] = points
+    else:
+      self._h5_file['annotations']['behaviors']['points_xy'][annotation_index, :, :] = -1
     timestamp_s = timestamp_s if timestamp_s is not None else time.time()
     self._h5_file['annotations']['behaviors']['timestamps_s'][annotation_index] = timestamp_s
     self._h5_file['annotations']['behaviors']['timestamps_str'][annotation_index] = time_s_to_str(timestamp_s, use_current_utc_time=True)
@@ -828,7 +842,11 @@ class Segmentations:
     self._h5_file['annotations']['events']['whales_involved'][annotation_index, whale_indexes_involved] = 1
     self._h5_file['annotations']['events']['confidences'][annotation_index] = confidence
     self._h5_file['annotations']['events']['notes'][annotation_index] = notes
-    self._h5_file['annotations']['events']['points_xy'][annotation_index, 0:len(points), :] = np.array(points) if points is not None else -1
+    if points is not None:
+      points = np.array(points)
+      self._h5_file['annotations']['events']['points_xy'][annotation_index, 0:points.shape[0], :] = points
+    else:
+      self._h5_file['annotations']['events']['points_xy'][annotation_index, :, :] = -1
     timestamp_s = timestamp_s if timestamp_s is not None else time.time()
     self._h5_file['annotations']['events']['timestamps_s'][annotation_index] = timestamp_s
     self._h5_file['annotations']['events']['timestamps_str'][annotation_index] = time_s_to_str(timestamp_s, use_current_utc_time=True)
@@ -868,7 +886,11 @@ class Segmentations:
     self._h5_file['annotations']['notes']['frame_bounds'][annotation_index, :] = frame_bounds
     self._h5_file['annotations']['notes']['whales_involved'][annotation_index, :] = 0
     self._h5_file['annotations']['notes']['whales_involved'][annotation_index, whale_indexes_involved] = 1
-    self._h5_file['annotations']['notes']['points_xy'][annotation_index, 0:len(points), :] = np.array(points) if points is not None else -1
+    if points is not None:
+      points = np.array(points)
+      self._h5_file['annotations']['notes']['points_xy'][annotation_index, 0:points.shape[0], :] = points
+    else:
+      self._h5_file['annotations']['notes']['points_xy'][annotation_index, :, :] = -1
     timestamp_s = timestamp_s if timestamp_s is not None else time.time()
     self._h5_file['annotations']['notes']['timestamps_s'][annotation_index] = timestamp_s
     self._h5_file['annotations']['notes']['timestamps_str'][annotation_index] = time_s_to_str(timestamp_s, use_current_utc_time=True)
@@ -887,7 +909,10 @@ class Segmentations:
     for (dataset_key, dataset) in self._h5_file['history'].items():
       dataset.resize((dataset.shape[0]+1, *dataset.shape[1:]))
     self._h5_file['history']['summaries'][annotation_index] = summary
-    self._h5_file['history']['details'][annotation_index] = details
+    try:
+      self._h5_file['history']['details'][annotation_index] = json.dumps(details)
+    except TypeError:
+      self._h5_file['history']['details'][annotation_index] = str(details)
     timestamp_s = timestamp_s if timestamp_s is not None else time.time()
     self._h5_file['history']['timestamps_s'][annotation_index] = timestamp_s
     self._h5_file['history']['timestamps_str'][annotation_index] = time_s_to_str(timestamp_s, use_current_utc_time=True)
@@ -1033,6 +1058,7 @@ class Segmentations:
         new_shape = list(dataset.shape)
         new_shape[whale_dimension] = (whale_index+1) + dataset_extra_expansion_size_whaleDimension
         dataset.resize(new_shape)
+    self._whale_ids = self.get_whale_ids(use_local_copy=False)
     for group_key in ['notes', 'behaviors', 'events']:
       whale_dimension = 1
       dataset = self._h5_file['annotations'][group_key]['whales_involved']
@@ -1043,7 +1069,16 @@ class Segmentations:
     # Update the local existence matrix.
     if not np.array_equal(self._whale_segmentations_exist.shape, self._h5_file['whale_segmentations_exist'].shape):
       self._whale_segmentations_exist = self.get_whale_segmentations_exist()
-    
+  
+  def _decode_utf8_values(self, values):
+    values_decoded = []
+    for value in values:
+      try:
+        values_decoded.append(value.decode('utf-8'))
+      except:
+        values_decoded.append('')
+    return values_decoded
+  
   ###############################
   # Masks
   ###############################
@@ -1100,7 +1135,7 @@ class Segmentations:
     self._expand_datasets(frame_index, whale_index)
     # Compute the mask contours if a binary mask was provided.
     if mask_matrix is not None and mask_contours is None:
-      mask_contours, _ = cv2.findContours(mask_matrix, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+      mask_contours, _ = cv2.findContours(mask_matrix.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     # Filter the contours by area.
     if contour_area_threshold_ratio is not None and self._frame_shape is not None:
       mask_contours = [contour for contour in mask_contours if cv2.contourArea(contour) >= (contour_area_threshold_ratio*np.prod(self._frame_shape))]
@@ -1476,6 +1511,7 @@ class Segmentations:
     # Fetch the dataset pointer.
     dataset = self._datasets['centroids_xy']
     # Write the new entry, if it is not a dummy entry.
+    centroid_yx = np.array(centroid_yx)
     if np.any(centroid_yx > 0):
       dataset[frame_index, whale_index, :] = np.array(centroid_yx)[[1,0]]
     # Update metadata arrays.
@@ -1934,6 +1970,7 @@ class Segmentations:
       matrix_shape = list(dataset.shape)
       matrix_shape[0] = num_whales_toKeep
       dataset.resize(matrix_shape)
+    self._whale_ids = self.get_whale_ids(use_local_copy=False)
     for group_key in ['notes', 'behaviors', 'events']:
       dataset = self._h5_file['annotations'][group_key]['whales_involved']
       if need_to_permute:
@@ -1963,6 +2000,7 @@ class Segmentations:
         data_1 = dataset[whale_index_1, :]
         dataset[whale_index_1, :] = dataset[whale_index_2, :]
         dataset[whale_index_2, :] = data_1
+      self._whale_ids = self.get_whale_ids(use_local_copy=False)
       for group_key in ['notes', 'behaviors', 'events']:
         dataset = self._h5_file['annotations'][group_key]['whales_involved']
         data_1 = dataset[:, whale_index_1]
@@ -2114,7 +2152,7 @@ class Segmentations:
     
     # Add a log entry for the action.
     author = author or self._author
-    segmentations_filtered.add_history_entry(summary='filter_whale_instances_byCount', details=json.dumps(original_locals),
+    segmentations_filtered.add_history_entry(summary='filter_whale_instances_byCount', details=original_locals,
                                              timestamp_s=time.time(), author=author)
     
     # Remove masks if desired.
@@ -3107,9 +3145,14 @@ class Segmentations:
                                timestamp_s=time.time(), author=author)
         # Resize the datasets to remove any extra empty frames or whale indexes
         # or to add frames if desired (i.e. if there  were no segmentations added for trailing frames in the video).
-        num_frames = self.get_max_frame_index_segmented()+1
+        num_frames = None
+        max_frame_index_segmented = self.get_max_frame_index_segmented()
+        if max_frame_index_segmented is not None:
+          num_frames = max_frame_index_segmented+1
         if num_frames_total is not None:
           num_frames = num_frames_total
+        if num_frames is None:
+          resize_frame_dimension = False
         whale_frame_counts = self.get_whale_frame_counts()
         whale_indexes_with_segmentations = np.where(whale_frame_counts > 0)[0]
         if whale_indexes_with_segmentations.size == 0:
@@ -3154,6 +3197,7 @@ class Segmentations:
             if not np.array_equal(new_shape, dataset.shape):
               edited_datasets = True
               dataset.resize(new_shape)
+          self._whale_ids = self.get_whale_ids(use_local_copy=False)
           for group_key in ['notes', 'behaviors', 'events']:
             whale_dimension = 1
             dataset = self._h5_file['annotations'][group_key]['whales_involved']
