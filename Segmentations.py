@@ -41,11 +41,11 @@ try:
 except:
   pass
 import cv2
-import decord
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib.patches import Circle
 
+from segmentation_infrastructure.DecordVideoReaderWrapper import DecordVideoReaderWrapper
 from segmentation_infrastructure.helpers.helpers_various import *
 
 class Segmentations:
@@ -287,8 +287,9 @@ class Segmentations:
         break
     
     # Will store unique colors for each segmentation instance.
+    # They take a little time to load though (about 0.09 seconds on XPS laptop),
+    #  so will only compute them the first time they are needed.
     self._segmentations_colors = []
-    self._update_segmentation_colors()
 
     # Open a reader for existing videos, or create an ffmpeg handle to write new ones.
     self._video_readers = {}
@@ -296,7 +297,8 @@ class Segmentations:
     self._num_video_frames = {}
     for (video_key, video_filepath) in self._video_filepaths.items():
       if os.path.exists(video_filepath):
-        self._video_readers[video_key] = decord.VideoReader(video_filepath)
+        print('Segmentations opening a video reader to', video_filepath)
+        self._video_readers[video_key] = DecordVideoReaderWrapper(video_filepath)
         self._ff_procs[video_key] = None
         self._num_video_frames[video_key] = len(self._video_readers[video_key])
       else:
@@ -592,6 +594,7 @@ class Segmentations:
     
   # Get a color for a specified whale index.
   def get_whale_color(self, whale_index, scale_range=255):
+    self._update_segmentation_colors() # compute colors if needed
     whale_color = self._segmentations_colors[whale_index % len(self._segmentations_colors)]
     if scale_range == 255:
       whale_color = [int(x) for x in whale_color]
@@ -605,110 +608,195 @@ class Segmentations:
   
   # Get annotation information.
   
-  def get_annotations_whale_ids(self, source_frame_start_index=None, source_frame_end_index=None, source_frame_indexes_includes=None):
+  def get_annotations_whale_ids(self, source_frame_start_index=None, source_frame_end_index=None,
+                                source_frame_indexes_includes=None,
+                                fieldnames=None):
     if self._h5_file is None:
       return None
+    if fieldnames is not None:
+      if 'source_frame_bounds' not in fieldnames:
+        if (source_frame_start_index is not None or source_frame_end_index is not None or source_frame_indexes_includes is not None):
+          fieldnames.append('source_frame_bounds')
     annotation_info = {}
     for key in ['ids', 'notes', 'authors', 'timestamps_str']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['whale_ids'][key]])
     for key in ['confidences', 'source_points_xy', 'source_frame_bounds', 'timestamps_s']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = np.array(self._datasets['annotations']['whale_ids'][key])
-    annotation_info['whale_index'] = np.arange(0, len(annotation_info['timestamps_s']))
+    if len(annotation_info) == 0:
+      return annotation_info
+    num_annotations = len(annotation_info[list(annotation_info.keys())[0]])
+    annotation_info['whale_index'] = np.arange(0, num_annotations)
     # Filter based on frame bounds if desired.
-    in_frame_bounds = np.ones_like(annotation_info['source_frame_bounds'][:,0]) == 1
+    in_frame_bounds = np.ones(shape=(num_annotations,)) == 1
     if source_frame_start_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['source_frame_bounds'][:,0] >= source_frame_start_index)
     if source_frame_end_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['source_frame_bounds'][:,1] <= source_frame_end_index)
     if source_frame_indexes_includes is not None:
-      in_frame_bounds = (annotation_info['source_frame_bounds'][:,0] >= source_frame_indexes_includes) & (annotation_info['source_frame_bounds'][:,1] <= source_frame_indexes_includes)
+      in_frame_bounds = (annotation_info['source_frame_bounds'][:,0] <= source_frame_indexes_includes) & (annotation_info['source_frame_bounds'][:,1] >= source_frame_indexes_includes)
     for key in annotation_info:
       if isinstance(annotation_info[key], (list, tuple)):
         annotation_info[key] = [x for (i, x) in enumerate(annotation_info[key]) if in_frame_bounds[i]]
       else:
         annotation_info[key] = annotation_info[key][in_frame_bounds]
     return annotation_info
+  def get_num_annotations_whale_ids(self):
+    if self._whale_ids is None:
+      return None
+    return len([id for id in self._whale_ids if len(id) > 0])
   
-  def get_annotations_notes(self, frame_start_index=None, frame_end_index=None, frame_indexes_includes=None):
+  def get_annotations_notes(self, frame_start_index=None, frame_end_index=None,
+                            frame_indexes_includes=None,
+                            fieldnames=None):
     if self._h5_file is None:
       return None
+    if fieldnames is not None:
+      if 'frame_bounds' not in fieldnames:
+        if (frame_start_index is not None or frame_end_index is not None or frame_indexes_includes is not None):
+          fieldnames.append('frame_bounds')
     annotation_info = {}
     for key in ['notes', 'authors', 'timestamps_str']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['notes'][key]])
     for key in ['frame_bounds', 'whales_involved', 'points_xy', 'timestamps_s']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = np.array(self._datasets['annotations']['notes'][key])
-    annotation_info['annotation_index'] = np.arange(0, len(annotation_info['timestamps_s']))
+    if len(annotation_info) == 0:
+      return annotation_info
+    num_annotations = len(annotation_info[list(annotation_info.keys())[0]])
+    annotation_info['annotation_index'] = np.arange(0, num_annotations)
     # Filter based on frame bounds if desired.
-    in_frame_bounds = np.ones_like(annotation_info['frame_bounds'][:,0]) == 1
+    in_frame_bounds = np.ones(shape=(num_annotations,)) == 1
     if frame_start_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['frame_bounds'][:,0] >= frame_start_index)
     if frame_end_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['frame_bounds'][:,1] <= frame_end_index)
     if frame_indexes_includes is not None:
-      in_frame_bounds = (annotation_info['frame_bounds'][:,0] >= frame_indexes_includes) & (annotation_info['frame_bounds'][:,1] <= frame_indexes_includes)
+      in_frame_bounds = (annotation_info['frame_bounds'][:,0] <= frame_indexes_includes) & (annotation_info['frame_bounds'][:,1] >= frame_indexes_includes)
     for key in annotation_info:
       if isinstance(annotation_info[key], (list, tuple)):
         annotation_info[key] = [x for (i, x) in enumerate(annotation_info[key]) if in_frame_bounds[i]]
       else:
         annotation_info[key] = annotation_info[key][in_frame_bounds]
     return annotation_info
-  
-  def get_annotations_behaviors(self, frame_start_index=None, frame_end_index=None, frame_indexes_includes=None):
+  def get_num_annotations_notes(self):
     if self._h5_file is None:
       return None
+    return self._datasets['annotations']['notes']['timestamps_s'].shape[0]
+  
+  def get_annotations_behaviors(self, frame_start_index=None, frame_end_index=None,
+                                frame_indexes_includes=None,
+                                fieldnames=None):
+    if self._h5_file is None:
+      return None
+    if fieldnames is not None:
+      if 'frame_bounds' not in fieldnames:
+        if (frame_start_index is not None or frame_end_index is not None or frame_indexes_includes is not None):
+          fieldnames.append('frame_bounds')
     annotation_info = {}
     for key in ['behaviors', 'notes', 'authors', 'timestamps_str']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['behaviors'][key]])
     for key in ['frame_bounds', 'whales_involved', 'points_xy', 'confidences', 'timestamps_s']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = np.array(self._datasets['annotations']['behaviors'][key])
-    annotation_info['annotation_index'] = np.arange(0, len(annotation_info['timestamps_s']))
+    if len(annotation_info) == 0:
+      return annotation_info
+    num_annotations = len(annotation_info[list(annotation_info.keys())[0]])
+    annotation_info['annotation_index'] = np.arange(0, num_annotations)
     # Filter based on frame bounds if desired.
-    in_frame_bounds = np.ones_like(annotation_info['frame_bounds'][:,0]) == 1
+    in_frame_bounds = np.ones(shape=(num_annotations,)) == 1
     if frame_start_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['frame_bounds'][:,0] >= frame_start_index)
     if frame_end_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['frame_bounds'][:,1] <= frame_end_index)
     if frame_indexes_includes is not None:
-      in_frame_bounds = (annotation_info['frame_bounds'][:,0] >= frame_indexes_includes) & (annotation_info['frame_bounds'][:,1] <= frame_indexes_includes)
+      in_frame_bounds = (annotation_info['frame_bounds'][:,0] <= frame_indexes_includes) & (annotation_info['frame_bounds'][:,1] >= frame_indexes_includes)
     for key in annotation_info:
       if isinstance(annotation_info[key], (list, tuple)):
         annotation_info[key] = [x for (i, x) in enumerate(annotation_info[key]) if in_frame_bounds[i]]
       else:
         annotation_info[key] = annotation_info[key][in_frame_bounds]
     return annotation_info
-  
-  def get_annotations_events(self, frame_start_index=None, frame_end_index=None, frame_indexes_includes=None):
+  def get_num_annotations_behaviors(self):
     if self._h5_file is None:
       return None
+    return self._datasets['annotations']['behaviors']['timestamps_s'].shape[0]
+    
+  def get_annotations_events(self, frame_start_index=None, frame_end_index=None,
+                             frame_indexes_includes=None,
+                             fieldnames=None):
+    if self._h5_file is None:
+      return None
+    if fieldnames is not None:
+      if 'frame_bounds' not in fieldnames:
+        if (frame_start_index is not None or frame_end_index is not None or frame_indexes_includes is not None):
+          fieldnames.append('frame_bounds')
     annotation_info = {}
     for key in ['events', 'notes', 'authors', 'timestamps_str']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['events'][key]])
     for key in ['frame_bounds', 'whales_involved', 'points_xy', 'confidences', 'timestamps_s']:
+      if fieldnames is not None and key not in fieldnames:
+        continue
       annotation_info[key] = np.array(self._datasets['annotations']['events'][key])
-    annotation_info['annotation_index'] = np.arange(0, len(annotation_info['timestamps_s']))
+    if len(annotation_info) == 0:
+      return annotation_info
+    num_annotations = len(annotation_info[list(annotation_info.keys())[0]])
+    annotation_info['annotation_index'] = np.arange(0, num_annotations)
     # Filter based on frame bounds if desired.
-    in_frame_bounds = np.ones_like(annotation_info['frame_bounds'][:,0]) == 1
+    in_frame_bounds = np.ones(shape=(num_annotations,)) == 1
     if frame_start_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['frame_bounds'][:,0] >= frame_start_index)
     if frame_end_index is not None:
       in_frame_bounds = in_frame_bounds & (annotation_info['frame_bounds'][:,1] <= frame_end_index)
     if frame_indexes_includes is not None:
-      in_frame_bounds = (annotation_info['frame_bounds'][:,0] >= frame_indexes_includes) & (annotation_info['frame_bounds'][:,1] <= frame_indexes_includes)
+      in_frame_bounds = (annotation_info['frame_bounds'][:,0] <= frame_indexes_includes) & (annotation_info['frame_bounds'][:,1] >= frame_indexes_includes)
     for key in annotation_info:
       if isinstance(annotation_info[key], (list, tuple)):
         annotation_info[key] = [x for (i, x) in enumerate(annotation_info[key]) if in_frame_bounds[i]]
       else:
         annotation_info[key] = annotation_info[key][in_frame_bounds]
     return annotation_info
+  def get_num_annotations_events(self):
+    if self._h5_file is None:
+      return None
+    return self._datasets['annotations']['events']['timestamps_s'].shape[0]
   
-  def get_history(self):
+  def get_history(self, time_start_s=0, fieldnames=None):
     if self._h5_file is None:
       return None
     history_info = {}
+    # Determine the first row that matches the desired timestamp filter.
+    row_index_start = 0
+    timestamps_s = np.array(self._datasets['history']['timestamps_s'])
+    if len(timestamps_s) > 0:
+      matching_row_indexes = np.where(timestamps_s >= time_start_s)[0]
+      if len(matching_row_indexes) > 0:
+        row_index_start = matching_row_indexes[0]
+      else:
+        return history_info
+    # Load the data.
     for key in ['summaries', 'details', 'authors', 'timestamps_str']:
-      history_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['history'][key]])
+      if fieldnames is not None and key not in fieldnames:
+        continue
+      history_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['history'][key][row_index_start:]])
     for key in ['timestamps_s']:
-      history_info[key] = np.array(self._datasets['history'][key])
+      if fieldnames is not None and key not in fieldnames:
+        continue
+      if key == 'timestamps_s':
+        history_info[key] = timestamps_s
+      else:
+        history_info[key] = np.array(self._datasets['history'][key])
     return history_info
   
   # Get the whale ID mapping.
@@ -1150,7 +1238,7 @@ class Segmentations:
       new_shape[2] = max(new_shape[2], num_contours)
       new_shape[3] = max(new_shape[3], max(contour_lengths))
       if not np.array_equal(dataset.shape, new_shape):
-        print('\t RESIZING old shape %s new shape %s' % (dataset.shape, new_shape))
+        print('\t RESIZING masks dataset old shape %s new shape %s' % (dataset.shape, new_shape))
         dataset.resize(new_shape)
       # Write the new entry.
       mask_contours = [np.squeeze(contour) for contour in mask_contours]
@@ -1282,7 +1370,7 @@ class Segmentations:
   #   C matches the max number of contours
   #   P matches the max number of points per contour
   #   2 is [x,y]
-  def set_masks_contours(self, frame_indexes, whale_index, masks_contours, author=''):
+  def set_masks_contours(self, end_frame_index, start_frame_index, whale_index, masks_contours, frames_are_segmented=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self.have_masks():
@@ -1296,17 +1384,22 @@ class Segmentations:
     # Get a pointer to the current dataset.
     dataset = self._datasets['masks']
     # Verify the new shape and type.
-    if masks_contours.shape[0] != len(frame_indexes):
-      raise AssertionError('The new mask matrix has %d frames, but will be assigned to %d indexes.' % (masks_contours.shape[0], len(frame_indexes)))
+    if masks_contours.shape[0] != end_frame_index - start_frame_index + 1:
+      raise AssertionError('The new mask matrix has %d frames, but will be assigned to %d indexes.' % (masks_contours.shape[0], end_frame_index - start_frame_index + 1))
     if (masks_contours.shape[2] != dataset.shape[2]) or (masks_contours.shape[3] != dataset.shape[3]):
       raise AssertionError('The new mask matrix has frame shape %s, but the current frame shape is %s.' % (list(masks_contours.shape[2:]), list(dataset.shape[2:])))
     if masks_contours.dtype != dataset.dtype:
       raise AssertionError('The new mask matrix has type %s, but the dataset on disk has type %s.' % (masks_contours.dtype, dataset.dtype))
+    if frames_are_segmented is not None and not frames_are_segmented.shape[0] == masks_contours.shape[0]:
+      raise AssertionError('The new mask matrix array has %d frames but the frames_are_segmented array has %d entries.' % (masks_contours.shape[0], frames_are_segmented.shape[0]))
     # Assign the new masks.
-    dataset[frame_indexes, whale_index, :, :, :] = masks_contours
+    dataset[start_frame_index:end_frame_index+1, whale_index, :, :, :] = masks_contours
     # Update metadata arrays.
-    self._datasets['frames_are_segmented'][frame_indexes] = 1
-    for (mask_index, frame_index) in enumerate(frame_indexes):
+    if frames_are_segmented is not None:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = frames_are_segmented
+    else:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
+    for (mask_index, frame_index) in enumerate(range(start_frame_index, end_frame_index+1)):
       mask_contours = masks_contours[mask_index, :, :, :]
       self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(mask_contours >= 0)
       self._whale_segmentations_exist[frame_index, whale_index] = np.any(mask_contours >= 0)
@@ -1454,7 +1547,7 @@ class Segmentations:
   
   # Set the bounding boxes for a desired whale in the desired frames.
   # Entries without real bounding boxes should use nan.
-  def set_bounding_boxes_4xy(self, bounding_box_key, start_frame_index, end_frame_index, whale_index, bounding_boxes_4xy, author=''):
+  def set_bounding_boxes_4xy(self, bounding_box_key, start_frame_index, end_frame_index, whale_index, bounding_boxes_4xy, frames_are_segmented=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
@@ -1470,6 +1563,8 @@ class Segmentations:
     if bounding_boxes_4xy.ndim == 1:
       if bounding_boxes_4xy.shape[0] != 8:
         raise AssertionError('The new bounding box array has 1 frame and %d entries, but should have 8 entries (x,y,x,y,x,y,x,y).' % (bounding_boxes_4xy.shape[0]))
+      if frames_are_segmented is not None and not frames_are_segmented.shape[0] == 1:
+        raise AssertionError('The new bounding box array has 1 frame but the frames_are_segmented array has %d entries.' % (frames_are_segmented.shape[0]))
     else:
       if bounding_boxes_4xy.ndim != 2:
         raise AssertionError('The new bounding box matrix has %d dimensions, but should have 2.' % (bounding_boxes_4xy.ndims))
@@ -1477,10 +1572,15 @@ class Segmentations:
         raise AssertionError('The new bounding box matrix has %d frames, but will be assigned to %d indexes.' % (bounding_boxes_4xy.shape[0], end_frame_index - start_frame_index + 1))
       if (bounding_boxes_4xy.shape[1] != dataset.shape[2]):
         raise AssertionError('The new bounding box matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(bounding_boxes_4xy.shape[1:]), list(dataset.shape[2:])))
+      if frames_are_segmented is not None and not frames_are_segmented.shape[0] == bounding_boxes_4xy.shape[0]:
+        raise AssertionError('The new bounding box array has %d frames but the frames_are_segmented array has %d entries.' % (bounding_boxes_4xy.shape[0], frames_are_segmented.shape[0]))
     # Assign the new bounding boxes.
     dataset[start_frame_index:end_frame_index+1, whale_index, :] = bounding_boxes_4xy
     # Update metadata arrays.
-    self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
+    if frames_are_segmented is not None:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = frames_are_segmented
+    else:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
     if bounding_boxes_4xy.ndim == 1:
       self._datasets['whale_segmentations_exist'][start_frame_index:end_frame_index+1, whale_index] = ~np.any(np.isnan(bounding_boxes_4xy))
       self._whale_segmentations_exist[start_frame_index:end_frame_index+1, whale_index] = ~np.any(np.isnan(bounding_boxes_4xy))
@@ -1594,7 +1694,7 @@ class Segmentations:
   
   # Set the centroids for a desired whale in the desired frames.
   # Entries without real centroids should use nan.
-  def set_centroids_xy(self, start_frame_index, end_frame_index, whale_index, centroids_xy, author=''):
+  def set_centroids_xy(self, start_frame_index, end_frame_index, whale_index, centroids_xy, frames_are_segmented=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
@@ -1609,6 +1709,8 @@ class Segmentations:
     if centroids_xy.ndim == 1:
       if centroids_xy.shape[0] != 2:
         raise AssertionError('The new centroid array has 1 frame and %d entries, but should have 8 entries (x,y,x,y,x,y,x,y).' % (centroids_xy.shape[0]))
+      if frames_are_segmented is not None and not frames_are_segmented.shape[0] == 1:
+        raise AssertionError('The new centroid array has 1 frame but the frames_are_segmented array has %d entries.' % (frames_are_segmented.shape[0]))
     else:
       if centroids_xy.ndim != 2:
         raise AssertionError('The new centroid matrix has %d dimensions, but should have 2.' % (centroids_xy.ndims))
@@ -1616,10 +1718,15 @@ class Segmentations:
         raise AssertionError('The new centroid matrix has %d frames, but will be assigned to %d indexes.' % (centroids_xy.shape[0], end_frame_index - start_frame_index + 1))
       if (centroids_xy.shape[1] != dataset.shape[2]):
         raise AssertionError('The new centroid matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(centroids_xy.shape[1:]), list(dataset.shape[2:])))
+      if frames_are_segmented is not None and not frames_are_segmented.shape[0] == centroids_xy.shape[0]:
+        raise AssertionError('The new centroid matrix has %d frames but the frames_are_segmented array has %d entries.' % (centroids_xy.shape[0], frames_are_segmented.shape[0]))
     # Assign the new centroids.
     dataset[start_frame_index:end_frame_index+1, whale_index, :] = centroids_xy
     # Update metadata arrays.
-    self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
+    if frames_are_segmented is not None:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = frames_are_segmented
+    else:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
     if centroids_xy.ndim == 1:
       self._datasets['whale_segmentations_exist'][start_frame_index:end_frame_index+1, whale_index] = ~np.any(np.isnan(centroids_xy))
       self._whale_segmentations_exist[start_frame_index:end_frame_index+1, whale_index] = ~np.any(np.isnan(centroids_xy))
@@ -1742,7 +1849,7 @@ class Segmentations:
   
   # Set the orientations for a desired whale in the desired frames.
   # Entries without real orientations should use nan.
-  def set_orientations_rad_confidence(self, start_frame_index, end_frame_index, whale_index, orientations_rad_confidence, author=''):
+  def set_orientations_rad_confidence(self, start_frame_index, end_frame_index, whale_index, orientations_rad_confidence, frames_are_segmented=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
@@ -1757,6 +1864,8 @@ class Segmentations:
     if orientations_rad_confidence.ndim == 1:
       if orientations_rad_confidence.shape[0] != 2:
         raise AssertionError('The new orientations array has 1 frame and %d entries, but should have 2 entries (angle and confidence).' % (orientations_rad_confidence.shape[0]))
+      if frames_are_segmented is not None and not frames_are_segmented.shape[0] == 1:
+        raise AssertionError('The new orientations array has 1 frame but the frames_are_segmented array has %d entries.' % (frames_are_segmented.shape[0]))
     else:
       if orientations_rad_confidence.ndim != 2:
         raise AssertionError('The new orientations matrix has %d dimensions, but should have 2.' % (orientations_rad_confidence.ndims))
@@ -1764,10 +1873,15 @@ class Segmentations:
         raise AssertionError('The new orientations matrix has %d frames, but will be assigned to %d indexes.' % (orientations_rad_confidence.shape[0], end_frame_index - start_frame_index + 1))
       if (orientations_rad_confidence.shape[1] != dataset.shape[2]):
         raise AssertionError('The new orientations matrix has shape %s for each frame/whale, but the shape should be %s.' % (list(orientations_rad_confidence.shape[1:]), list(dataset.shape[2:])))
+      if frames_are_segmented is not None and not frames_are_segmented.shape[0] == orientations_rad_confidence.shape[0]:
+        raise AssertionError('The new orientations array has %d frames but the frames_are_segmented array has %d entries.' % (orientations_rad_confidence.shape[0], frames_are_segmented.shape[0]))
     # Assign the new orientations.
     dataset[start_frame_index:end_frame_index+1, whale_index, :] = orientations_rad_confidence
     # Update metadata arrays.
-    self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
+    if frames_are_segmented is not None:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = frames_are_segmented
+    else:
+      self._datasets['frames_are_segmented'][start_frame_index:end_frame_index+1] = 1
     if orientations_rad_confidence.ndim == 1:
       self._datasets['whale_segmentations_exist'][start_frame_index:end_frame_index+1, whale_index] = ~np.isnan(orientations_rad_confidence[0])
       self._whale_segmentations_exist[start_frame_index:end_frame_index+1, whale_index] = ~np.isnan(orientations_rad_confidence[0])
@@ -2969,6 +3083,7 @@ class Segmentations:
         if mask_contours is not None:
           for contour in mask_contours:
             coords_xy = np.atleast_2d(np.squeeze(contour))
+            # self._update_segmentation_colors() # compute colors if needed
             # plt.plot(coords_xy[:,0], coords_xy[:,1], '.-', alpha=mask_alpha,
             #        color=self._segmentations_colors[whale_index % len(self._segmentations_colors)]/255)
             plt.gca().add_patch(Polygon(
@@ -3233,6 +3348,16 @@ class Segmentations:
           ff_proc.wait()
     except AttributeError:
       pass # The class probably didn't finish initializing and create the self._ff_procs variable
+    # Close any video readers.
+    try:
+      for (video_key, video_reader) in self._video_readers.items():
+        if video_reader is not None:
+          video_reader.close()
+          video_reader = None
+          self._video_readers[video_key] = None
+      del self._video_readers
+    except AttributeError:
+      pass # The class probably didn't finish initializing and create the self._video_readers variable
     
   def close(self, resize_frame_dimension=False, resize_whale_dimension=False, remove_unused_whale_indexes=False,
                   num_frames_total=None, num_whales_total=None, author=''):
