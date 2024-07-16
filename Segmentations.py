@@ -266,7 +266,7 @@ class Segmentations:
       
       # Store metadata if creating a new file.
       if (not using_existing_file) and self._writable:
-        self._update_metadata('frame_shape',  list(frame_shape))
+        self._update_metadata('frame_shape',  list(frame_shape) if frame_shape is not None else [])
         self._update_metadata('format_version',  8)
         self._update_metadata_dateModified(segmentations=True, annotations=True)
         self.add_history_entry(summary='Created Datasets', details=None, timestamp_s=None, author=self._author)
@@ -445,6 +445,8 @@ class Segmentations:
     if frames_are_segmented is None:
       return None
     frame_indexes_with_segmentations = np.where(frames_are_segmented)[0]
+    if frame_indexes_with_segmentations.size == 0:
+      return None
     if frames_are_segmented.shape[0] == 1:
       # If there is only one entry, consider that the best one.
       best_index = 0
