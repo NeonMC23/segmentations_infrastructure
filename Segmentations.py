@@ -199,6 +199,8 @@ class Segmentations:
             'compression_opts': self._h5_compression_level, # 0-9, default is 4
           }
           whale_ids.create_dataset('ids', [0, 1], maxshape=[None, 1], chunks=(32,1), dtype='S128', **dataset_kwargs)
+          whale_ids.create_dataset('id_numbers', [0, 1], maxshape=[None, 1], chunks=(32,1), dtype='int', **dataset_kwargs)
+          whale_ids.create_dataset('is_auto_id', [0, 1], maxshape=[None, 1], chunks=(32,1), dtype='uint8', **dataset_kwargs)
           whale_ids.create_dataset('confidences', [0, 1], maxshape=[None, 1], chunks=(32,1), dtype='float', fillvalue=np.nan, **dataset_kwargs)
           whale_ids.create_dataset('notes', [0, 1], maxshape=[None, 1], chunks=(32,1), dtype='S256', **dataset_kwargs)
           whale_ids.create_dataset('source_points_xy', [0, 0, 2], maxshape=[None, None, 2], chunks=(32,32,2), dtype='int', fillvalue=-1, **dataset_kwargs)
@@ -267,7 +269,7 @@ class Segmentations:
       # Store metadata if creating a new file.
       if (not using_existing_file) and self._writable:
         self._update_metadata('frame_shape',  list(frame_shape) if frame_shape is not None else [])
-        self._update_metadata('format_version',  8)
+        self._update_metadata('format_version',  9)
         self._update_metadata_dateModified(segmentations=True, annotations=True)
         self.add_history_entry(summary='Created Datasets', details=None, timestamp_s=None, author=self._author)
       else:
@@ -278,6 +280,8 @@ class Segmentations:
     self._whale_segmentations_exist = self.get_whale_segmentations_exist()
     # Similarly, store a copy of the whale IDs in memory.
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
+    self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+    self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
     
     # Store the number of frames.
     self._num_frames = 0
@@ -558,6 +562,16 @@ class Segmentations:
     except ValueError:
       return None
   
+  # Get a whale index corresponding to the desired whale ID number.
+  def get_whale_index_for_whale_id_number(self, whale_id_number):
+    whale_id_numbers = self.get_whale_id_numbers()
+    if whale_id_numbers is None:
+      return None
+    try:
+      return np.where(whale_id_numbers == whale_id_number)[0][0]
+    except IndexError:
+      return None
+    
   # Get the next frame index with a segmentation.
   def get_next_frame_index_with_whale_segmentation(self, frame_index, whale_index):
     whale_segmentations_exist = self._whale_segmentations_exist[:, whale_index]
@@ -624,7 +638,7 @@ class Segmentations:
       if fieldnames is not None and key not in fieldnames:
         continue
       annotation_info[key] = self._decode_utf8_values([value[0] for value in self._datasets['annotations']['whale_ids'][key]])
-    for key in ['confidences', 'source_points_xy', 'source_frame_bounds', 'timestamps_s']:
+    for key in ['id_numbers', 'is_auto_id', 'confidences', 'source_points_xy', 'source_frame_bounds', 'timestamps_s']:
       if fieldnames is not None and key not in fieldnames:
         continue
       annotation_info[key] = np.array(self._datasets['annotations']['whale_ids'][key])
@@ -646,10 +660,20 @@ class Segmentations:
       else:
         annotation_info[key] = annotation_info[key][in_frame_bounds]
     return annotation_info
-  def get_num_annotations_whale_ids(self):
+  def get_num_annotations_whale_ids(self, only_manual_ids=False, only_auto_ids=False):
     if self._whale_ids is None:
       return None
-    return len([id for id in self._whale_ids if len(id) > 0])
+    ids = self.get_whale_ids()
+    id_exists = [len(id) > 0 for id in ids]
+    is_auto = self.get_whale_ids_is_auto()
+    is_manual = [not id_is_auto for id_is_auto in is_auto]
+    if only_manual_ids:
+      ids_filtered = [id for (i, id) in enumerate(self.get_whale_ids()) if id_exists[i] and is_manual[i]]
+    elif only_auto_ids:
+      ids_filtered = [id for (i, id) in enumerate(self.get_whale_ids()) if id_exists[i] and is_auto[i]]
+    else:
+      ids_filtered = [id for (i, id) in enumerate(self.get_whale_ids()) if id_exists[i]]
+    return len(ids_filtered)
   
   def get_annotations_notes(self, frame_start_index=None, frame_end_index=None,
                             frame_indexes_includes=None,
@@ -809,8 +833,24 @@ class Segmentations:
       return self._decode_utf8_values([whale_id[0] for whale_id in self._datasets['annotations']['whale_ids']['ids']])
     return None
   
-  # Get the whale ID for a specific whale index.
-  def get_whale_id(self, whale_index):
+  def get_whale_id_numbers(self, use_local_copy=True):
+    if use_local_copy:
+      return self._whale_id_numbers
+    if self._h5_file is not None:
+      return np.squeeze(self._datasets['annotations']['whale_ids']['id_numbers'])
+    return None
+  
+  def get_whale_ids_is_auto(self, use_local_copy=True):
+    if use_local_copy:
+      return self._whale_ids_is_auto
+    if self._h5_file is not None:
+      return [bool(is_auto) for is_auto in self._datasets['annotations']['whale_ids']['is_auto_id']]
+    return None
+  
+  # Get the whale ID for a specific whale index or ID number.
+  def get_whale_id(self, whale_id_number=None, whale_index=None):
+    if whale_id_number is not None:
+      whale_index = self.get_whale_index_for_whale_id_number(whale_id_number)
     if whale_index is None or whale_index < 0 or whale_index >= self.get_num_whales():
       return None
     whale_ids = self.get_whale_ids()
@@ -818,8 +858,31 @@ class Segmentations:
       return whale_ids[whale_index]
     return None
   
+  def get_whale_id_number(self, whale_index):
+    if whale_index is None or whale_index < 0 or whale_index >= self.get_num_whales():
+      return None
+    return self.get_whale_id_numbers()[whale_index]
+  
+  def get_whale_id_is_auto(self, whale_id_number=None, whale_index=None):
+    if whale_id_number is not None:
+      whale_index = self.get_whale_index_for_whale_id_number(whale_id_number)
+    if whale_index is None or whale_index < 0 or whale_index >= self.get_num_whales():
+      return None
+    return self.get_whale_ids_is_auto()[whale_index]
+  
+  # Refresh the whale ID numbers to make them sequential.
+  def reassign_whale_id_numbers(self):
+    whale_id_numbers = self.get_whale_id_numbers()
+    if whale_id_numbers is None:
+      return
+    if not self._writable:
+      return
+    new_id_numbers = list(range(whale_id_numbers.shape[0]))
+    self._datasets['annotations']['whale_ids']['id_numbers'][:,0] = new_id_numbers
+    self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+    
   # Assign a whale ID to a whale index.
-  def add_annotation_whale_id(self, whale_index, whale_id, frame_bounds=None, confidence=np.nan, notes='', points=None, timestamp_s=None, author=''):
+  def add_annotation_whale_id(self, whale_index, whale_id, is_auto_id=False, frame_bounds=None, confidence=np.nan, notes='', points=None, timestamp_s=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     # Add a log entry for the action.
@@ -835,6 +898,7 @@ class Segmentations:
       dataset.resize(new_shape)
     # Update the annotation information.
     self._h5_file['annotations']['whale_ids']['ids'][whale_index] = str(whale_id) if whale_id is not None else ''
+    self._h5_file['annotations']['whale_ids']['is_auto_id'][whale_index] = is_auto_id
     self._h5_file['annotations']['whale_ids']['confidences'][whale_index] = confidence
     self._h5_file['annotations']['whale_ids']['notes'][whale_index] = notes
     self._h5_file['annotations']['whale_ids']['source_frame_bounds'][whale_index, :] = frame_bounds if frame_bounds is not None else -1
@@ -851,6 +915,8 @@ class Segmentations:
     self._update_metadata_dateModified(segmentations=False, annotations=True)
     # Update the local copy of the whale IDs.
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
+    self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+    self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
   
   # Add a behavior annotation.
   def add_annotation_behavior(self, behavior, frame_bounds, whale_indexes_involved, confidence=np.nan, notes='', points=None, timestamp_s=None, author='',
@@ -999,10 +1065,24 @@ class Segmentations:
     for (dataset_key, dataset) in self._h5_file['history'].items():
       dataset.resize((dataset.shape[0]+1, *dataset.shape[1:]))
     self._h5_file['history']['summaries'][annotation_index] = summary
+    if isinstance(details, dict):
+      whale_id_numbers = self.get_whale_id_numbers()
+      if 'whale_index' in details:
+        details['whale_id_number'] = whale_id_numbers[details['whale_index']]
+      if 'whale_indexes_involved' in details:
+        details['whale_id_numbers_involved'] = [whale_id_numbers[w] for w in details['whale_indexes_involved']]
+      if 'whale_index_toMove' in details:
+        details['whale_id_number_toMove'] = whale_id_numbers[details['whale_index_toMove']]
+      if 'whale_index_1' in details:
+        details['whale_id_number_1'] = whale_id_numbers[details['whale_index_1']]
+      if 'whale_index_source' in details:
+        details['whale_id_number_source'] = whale_id_numbers[details['whale_index_source']]
     try:
-      self._h5_file['history']['details'][annotation_index] = json.dumps(details)
+      details = json.dumps(details)
     except TypeError:
-      self._h5_file['history']['details'][annotation_index] = str(details)
+      details = str(details)
+    details = details[0:self._h5_file['history']['details'].dtype.itemsize]
+    self._h5_file['history']['details'][annotation_index] = details
     timestamp_s = timestamp_s if timestamp_s is not None else time.time()
     self._h5_file['history']['timestamps_s'][annotation_index] = timestamp_s
     self._h5_file['history']['timestamps_str'][annotation_index] = time_s_to_str(timestamp_s, use_current_utc_time=True)
@@ -1010,7 +1090,7 @@ class Segmentations:
   
   # Delete a whale ID annotation.
   def delete_annotation_whale_id(self, whale_index, timestamp_s=None, author=''):
-    self.add_annotation_whale_id(whale_index, whale_id='', frame_bounds=None, confidence=np.nan, notes='', points=None, timestamp_s=timestamp_s, author=author)
+    self.add_annotation_whale_id(whale_index, whale_id='', is_auto_id=False, frame_bounds=None, confidence=np.nan, notes='', points=None, timestamp_s=timestamp_s, author=author)
   
   # Delete a behavior annotation.
   def delete_annotation_behavior(self, annotation_index_toRemove, timestamp_s=None, author=''):
@@ -1148,7 +1228,13 @@ class Segmentations:
         new_shape = list(dataset.shape)
         new_shape[whale_dimension] = (whale_index+1) + dataset_extra_expansion_size_whaleDimension
         dataset.resize(new_shape)
+    max_whale_id_number = max(self._whale_id_numbers) if len(self._whale_id_numbers) > 0 else -1
+    for whale_index in range(len(self._whale_id_numbers), self._datasets['annotations']['whale_ids']['id_numbers'].shape[0]):
+      self._datasets['annotations']['whale_ids']['id_numbers'][whale_index] = max_whale_id_number+1
+      max_whale_id_number += 1
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
+    self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+    self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
     for group_key in ['notes', 'behaviors', 'events']:
       whale_dimension = 1
       dataset = self._h5_file['annotations'][group_key]['whales_involved']
@@ -1598,11 +1684,13 @@ class Segmentations:
   # Add a centroid of the mask for the desired frame and whale index.
   # centroid_yx is 2 numbers: (y, x)
   #  This can be the direct output of props.centroid if using skimage.measure.regionprops
-  def add_centroid(self, frame_index, whale_index, centroid_yx, log_in_history=False, author=''):
+  def add_centroid(self, frame_index, whale_index, centroid_yx=None, centroid_xy=None, log_in_history=False, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
       raise AssertionError('Segmentations was opened in read-only mode')
+    if centroid_yx is None and centroid_xy is None:
+      raise AssertionError('No centroid was provided')
     # Add a log entry for the action.
     author = author or self._author
     if log_in_history:
@@ -1612,14 +1700,16 @@ class Segmentations:
     self._expand_datasets(frame_index, whale_index)
     # Fetch the dataset pointer.
     dataset = self._datasets['centroids_xy']
-    # Write the new entry, if it is not a dummy entry.
-    centroid_yx = np.array(centroid_yx)
-    if np.any(centroid_yx > 0):
-      dataset[frame_index, whale_index, :] = np.array(centroid_yx)[[1,0]]
+    # Write the new entry.
+    if centroid_yx is not None:
+      centroid_xy = np.array(centroid_yx)[[1,0]]
+    elif centroid_xy is not None:
+      centroid_xy = np.array(centroid_xy)
+    dataset[frame_index, whale_index, :] = centroid_xy
     # Update metadata arrays.
     self._datasets['frames_are_segmented'][frame_index] = 1
-    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = np.any(centroid_yx > 0)
-    self._whale_segmentations_exist[frame_index, whale_index] = np.any(centroid_yx > 0)
+    self._datasets['whale_segmentations_exist'][frame_index, whale_index] = ~np.any(np.isnan(centroid_xy))
+    self._whale_segmentations_exist[frame_index, whale_index] = ~np.any(np.isnan(centroid_xy))
     self._num_frames = max(self._num_frames, frame_index+1)
   
   # Get a centroid for a desired frame and whale index.
@@ -2087,6 +2177,8 @@ class Segmentations:
       matrix_shape[0] = num_whales_toKeep
       dataset.resize(matrix_shape)
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
+    self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+    self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
     for group_key in ['notes', 'behaviors', 'events']:
       dataset = self._h5_file['annotations'][group_key]['whales_involved']
       if need_to_permute:
@@ -2117,6 +2209,8 @@ class Segmentations:
         dataset[whale_index_1, :] = dataset[whale_index_2, :]
         dataset[whale_index_2, :] = data_1
       self._whale_ids = self.get_whale_ids(use_local_copy=False)
+      self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+      self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
       for group_key in ['notes', 'behaviors', 'events']:
         dataset = self._h5_file['annotations'][group_key]['whales_involved']
         data_1 = dataset[:, whale_index_1]
@@ -2887,7 +2981,8 @@ class Segmentations:
   # Get a desired video frame.
   def get_video_frame(self, video_key, frame_index, resize_to_mask_shape=False,
                       show_masks=False, show_centroids=False,
-                      show_orientations=False, show_boxes=None, show_whale_indexes=False):
+                      show_orientations=False, show_boxes=None,
+                      show_whale_id_numbers=False, show_whale_indexes=False):
     if self._ff_procs[video_key] is not None:
       raise AssertionError('Cannot currently read a video while it is being created')
     if self._video_filepaths[video_key] is None:
@@ -2900,7 +2995,7 @@ class Segmentations:
     img_rgb = self._video_readers[video_key][frame_index].asnumpy()
     
     # Resize the image to match the mask shape if desired.
-    annotating_img = show_masks or show_centroids or show_orientations or (show_boxes is not None) or show_whale_indexes
+    annotating_img = show_masks or show_centroids or show_orientations or (show_boxes is not None) or show_whale_id_numbers or show_whale_indexes
     if (resize_to_mask_shape or annotating_img) and self.have_masks():
       img_rgb = scale_image(img_rgb, target_width=self._frame_shape[1], target_height=self._frame_shape[0], maintain_aspect_ratio=False)
     
@@ -2911,6 +3006,7 @@ class Segmentations:
                                              show_centroids=show_centroids,
                                              show_orientations=show_orientations,
                                              show_boxes=show_boxes,
+                                             show_whale_id_numbers=show_whale_id_numbers,
                                              show_whale_indexes=show_whale_indexes)
     
     # Return the result.
@@ -2924,7 +3020,7 @@ class Segmentations:
   def visualize_segmentations(self, frame_index, img_rgb=None, graph=False, fig=None,
                               show_masks=False, show_centroids=False,
                               show_orientations=False, show_boxes=None,
-                              show_whale_indexes=False):
+                              show_whale_id_numbers=False, show_whale_indexes=False):
     # If no image is provided and there are no masks, use graphing.
     if img_rgb is None and not self.have_masks():
       graph = True
@@ -2934,19 +3030,19 @@ class Segmentations:
       return self.visualize_segmentations_on_image(frame_index=frame_index, img_rgb=img_rgb,
                                                     show_masks=show_masks, show_centroids=show_centroids,
                                                     show_orientations=show_orientations, show_boxes=show_boxes,
-                                                    show_whale_indexes=show_whale_indexes)
+                                                    show_whale_id_numbers=show_whale_id_numbers, show_whale_indexes=show_whale_indexes)
     else:
       return self.visualize_segmentations_on_graph(frame_index=frame_index, fig=fig,
                                                     show_masks=show_masks, show_centroids=show_centroids,
                                                     show_orientations=show_orientations, show_boxes=show_boxes,
-                                                    show_whale_indexes=show_whale_indexes)
+                                                    show_whale_id_numbers=show_whale_id_numbers, show_whale_indexes=show_whale_indexes)
   
   # Add segmentation visualizations to a frame.
   # If the image frame is None, will draw on a black image.
   def visualize_segmentations_on_image(self, frame_index, img_rgb=None,
                                         show_masks=False, show_centroids=False,
                                         show_orientations=False, show_boxes=None,
-                                        show_whale_indexes=False):
+                                        show_whale_id_numbers=False, show_whale_indexes=False):
     # Create a black image if no frame was provided.
     if img_rgb is None:
       img_rgb = np.zeros((*self.get_frame_shape(), 3), dtype=np.uint8)
@@ -3023,17 +3119,21 @@ class Segmentations:
         else:
           # The segmentation did not exist for this whale in this frame.
           pass
-      # Write the whale indexes.
-      if show_whale_indexes:
+      # Write the whale indexes or ID numbers.
+      if show_whale_id_numbers or show_whale_indexes:
         centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
         if centroid_xy is not None:
           centroid_xy = centroid_xy.astype(int)
           bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key='full', frame_index=frame_index, whale_index=whale_index)
           bounding_boxes_4xy_reshaped = bounding_box_4xy.reshape((-1, 2))
           # Find a font scale.
+          if show_whale_id_numbers:
+            text_str = '%s' % self.get_whale_id_numbers()[whale_index]
+          else:
+            text_str = '%s' % whale_index
           (text_w, text_h, font_scale, _) = draw_text_on_image(
             img_bgr_annotated,
-            '%s' % whale_index,
+            text_str,
             pos=(0.5, 0.5),
             font_scale=None,
             text_height_ratio=0.02,#(box_width)/img.shape[1],
@@ -3047,7 +3147,7 @@ class Segmentations:
           text_xy = centroid_xy + np.array([-text_w, text_h])
           draw_text_on_image(
             img_bgr_annotated,
-            '%s' % whale_index,
+            text_str,
             pos=text_xy,
             font_scale=font_scale,
             text_height_ratio=None,
@@ -3066,7 +3166,7 @@ class Segmentations:
   def visualize_segmentations_on_graph(self, frame_index, fig=None,
                               show_masks=False, show_centroids=False,
                               show_orientations=False, show_boxes=None,
-                              show_whale_indexes=False):
+                              show_whale_id_numbers=False, show_whale_indexes=False):
     # Create a figure if none was provided.
     if fig is None:
       fig = plt.figure()
@@ -3155,12 +3255,15 @@ class Segmentations:
         else:
           # The segmentation did not exist for this whale in this frame.
           pass
-      # Write the whale indexes.
-      if show_whale_indexes:
+      # Write the whale indexes or ID numbers.
+      if show_whale_id_numbers or show_whale_indexes:
         centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
         if centroid_xy is not None:
           centroid_xy = centroid_xy.astype(int)
-          text_str = '%s' % whale_index
+          if show_whale_id_numbers:
+            text_str = '%s' % self.get_whale_id_numbers()[whale_index]
+          else:
+            text_str = '%s' % whale_index
           text_xy = centroid_xy
           plt.text(text_xy[0], text_xy[1], text_str)
     
@@ -3236,7 +3339,7 @@ class Segmentations:
       plt.plot(x[frame_indexes_withWhale], y[frame_indexes_withWhale],
                '.-', color=whale_color, markersize=trajectory_markersize, linewidth=trajectory_linewidth)
       # Label the whale index.
-      text_str = '%s' % whale_index
+      text_str = '%s' % self.get_whale_id_numbers()[whale_index]
       plt.text(x0, y0, text_str, backgroundcolor=(0.8, 0.8, 0.8))
     # Format the plot.
     plt.title('Centroid Trajectories')
@@ -3314,7 +3417,13 @@ class Segmentations:
             if not np.array_equal(new_shape, dataset.shape):
               edited_datasets = True
               dataset.resize(new_shape)
+          max_whale_id_number = max(self._whale_id_numbers) if len(self._whale_id_numbers) > 0 else -1
+          for whale_index in range(len(self._whale_id_numbers), self._h5_file['annotations']['whale_ids']['id_numbers'].shape[0]):
+            self._h5_file['annotations']['whale_ids']['id_numbers'][whale_index] = max_whale_id_number+1
+            max_whale_id_number += 1
           self._whale_ids = self.get_whale_ids(use_local_copy=False)
+          self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
+          self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
           for group_key in ['notes', 'behaviors', 'events']:
             whale_dimension = 1
             dataset = self._h5_file['annotations'][group_key]['whales_involved']

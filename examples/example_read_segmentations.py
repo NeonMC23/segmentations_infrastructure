@@ -124,9 +124,9 @@ print()
 #   I is the maximum number of whales
 #   Each entry is 0 or 1, indicating whether that whale was found in that frame.
 #
-# whale_ids will be Ix1
+# whale_ids and whale_id_numbers will be Ix1
 #   I is the maximum number of whales
-#   Each entry is the ID (whale name) associated with that whale index.
+#   Each entry is the ID (whale name) or ID number (persistent) associated with that whale index.
 #
 #######################################################################
 
@@ -168,8 +168,9 @@ frames_are_segmented = segmentations.get_frames_are_segmented()
 # Get whether segmentations were found for each whale in each frame.
 whale_segmentations_exist = segmentations.get_whale_segmentations_exist()
 
-# Get the whale ID for each whale index.
+# Get the whale ID name or number for each whale index.
 whale_ids = segmentations.get_whale_ids()
+whale_id_numbers = segmentations.get_whale_id_numbers()
 
 print(' See the following matrix shapes')
 if segmentations.have_masks(): # filtered versions of the data may not have masks
@@ -183,11 +184,13 @@ print('  orientations_confidence: type %s of %s | shape' % (type(orientations_co
 print('  frames_are_segmented: type %s of %s | shape' % (type(frames_are_segmented), frames_are_segmented.dtype), frames_are_segmented.shape)
 print('  whale_segmentations_exist: type %s of %s | shape' % (type(whale_segmentations_exist), whale_segmentations_exist.dtype), whale_segmentations_exist.shape)
 print('  whale_ids: type %s of %s | length' % (type(whale_ids), type(whale_ids[0])), len(whale_ids))
+print('  whale_id_numbers: type %s of %s | length' % (type(whale_id_numbers), type(whale_id_numbers[0])), len(whale_id_numbers))
 
 ###################################
 # Use the matrices spanning all frames to get data for a particular frame and whale instance.
 frame_index = 3
-whale_index = 1
+whale_id_number = 1
+whale_index = segmentations.get_whale_index_for_whale_id_number(whale_id_number)
 
 if segmentations.have_masks(): # filtered versions of the data may not have masks
   # Get the mask contours for this whale and frame.
@@ -249,7 +252,8 @@ print()
 print('-'*50)
 print('Getting data for a particular frame and whale')
 frame_index = 3
-whale_index = 1
+whale_id_number = 1
+whale_index = segmentations.get_whale_index_for_whale_id_number(whale_id_number)
 
 # Check whether the segmentation exists for this whale in this frame.
 whale_is_present = whale_segmentations_exist[frame_index, whale_index]
@@ -395,12 +399,14 @@ segmentations_filtered = segmentations_copy.filter_whale_instances_byCount(
     # If True, will return a Segmentations object for the new HDF5 file.
     # If False, will edit the current HDF5 file (and return None).
     create_new_hdf5_file=True,
-    overwrite_destination_hdf5_file_if_exists=True,
+    overwrite_destination_hdf5_file_if_exists=True
 )
 
-num_whales_filtered = segmentations_filtered.get_num_whales()
-print('See %d whales after filtering with a frame count threshold of %d' % (num_whales_filtered, whale_frame_count_threshold))
-print(time.time() - t0)
+if segmentations_filtered is not None:
+  num_whales_filtered = segmentations_filtered.get_num_whales()
+  print('See %d whales after filtering with a frame count threshold of %d' % (num_whales_filtered, whale_frame_count_threshold))
+else:
+  print('No whales were removed by filtering with a frame count threshold of %d' % (whale_frame_count_threshold))
 print()
 
 #######################################################################
@@ -562,25 +568,29 @@ for video_key in video_filepaths:
                                                       show_centroids=False,
                                                       show_orientations=False,
                                                       show_boxes=None,
-                                                      show_whale_indexes=True))
+                                                      show_whale_id_numbers=True,
+                                                      show_whale_indexes=False))
   else:
     imgs_rgb_annotated.append(segmentations.get_video_frame(video_key=video_key, frame_index=frame_index_toFetch,
                                                       show_masks=False,
                                                       show_centroids=True,
                                                       show_orientations=False,
                                                       show_boxes=['full'],
-                                                      show_whale_indexes=True))
+                                                      show_whale_id_numbers=True,
+                                                      show_whale_indexes=False))
   imgs_rgb_annotated.append(segmentations.get_video_frame(video_key=video_key, frame_index=frame_index_toFetch,
                                                     show_masks=False,
                                                     show_centroids=True,
                                                     show_orientations=True,
                                                     show_boxes=['full'],
+                                                    show_whale_id_numbers=False,
                                                     show_whale_indexes=False))
   imgs_rgb_annotated.append(segmentations.get_video_frame(video_key=video_key, frame_index=frame_index_toFetch,
                                                     show_masks=False,
                                                     show_centroids=False,
                                                     show_orientations=False,
                                                     show_boxes=['full', 'head', 'tail'],
+                                                    show_whale_id_numbers=False,
                                                     show_whale_indexes=False))
 
   # Show the original frame and the annotated frames side by side.
@@ -634,7 +644,8 @@ fig = segmentations.visualize_segmentations(frame_index=frame_index_toFetch,
                                             show_centroids=True,
                                             show_orientations=True,
                                             show_boxes=['full', 'head', 'tail'],
-                                            show_whale_indexes=True)
+                                            show_whale_id_numbers=True,
+                                            show_whale_indexes=False)
 print('  Close the figure to continue')
 plt.show(block=True)
 
@@ -673,7 +684,8 @@ print('Also trimming datasets and removing unused whale indexes in the copied fi
 segmentations.close()
 segmentations_copy.close(resize_frame_dimension=True, num_frames_total=segmentations_copy.get_num_frames_total(),
                          resize_whale_dimension=True, remove_unused_whale_indexes=True)
-segmentations_filtered.close()
+if segmentations_filtered is not None:
+  segmentations_filtered.close()
 
 print()
 print('-'*50)
