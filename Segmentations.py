@@ -45,8 +45,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib.patches import Circle
 
-from segmentation_infrastructure.DecordVideoReaderWrapper import DecordVideoReaderWrapper
-from segmentation_infrastructure.helpers.helpers_various import *
+from csail_data_processing.DecordVideoReaderWrapper import DecordVideoReaderWrapper
+from csail_data_processing.helpers.helpers_various import *
 
 class Segmentations:
   ###############################
@@ -336,6 +336,7 @@ class Segmentations:
     metadata = convert_dict_values_to_str(metadata, preserve_nested_dicts=False)
     self._h5_file.attrs.update(metadata)
   
+  # Update the date modified.
   def _update_metadata_dateModified(self, time_s=None, segmentations=True, annotations=True):
     if not self._writable:
       return
@@ -350,7 +351,44 @@ class Segmentations:
       dateModified_dict['date_modified_annotations_time_str'] = time_str
     if len(dateModified_dict) > 0:
       self._update_metadata(items=dateModified_dict.items())
-    
+  
+  # Get the date modified.
+  def get_date_modified(self, segmentations=True, annotations=True,
+                              return_str=True, return_epoch_s=False,
+                              date_str_format='%Y-%m-%d %H:%M:%S.%f',
+                              date_str_use_local_timezone=False,
+                              date_str_include_timezone_offset=True):
+    metadata = dict(self._h5_file.attrs.items())
+    dates_modified_s = []
+    if segmentations:
+      try:
+        dates_modified_s.append(float(metadata['date_modified_segmentations_time_s']))
+      except:
+        pass
+    if annotations:
+      try:
+        dates_modified_s.append(float(metadata['date_modified_annotations_time_s']))
+      except:
+        pass
+    import traceback
+    try:
+      date_modified_s = max(dates_modified_s)
+      date_modified_str = time_s_to_str(date_modified_s,
+                                        use_current_local_time=date_str_use_local_timezone,
+                                        use_current_utc_time=(not date_str_use_local_timezone),
+                                        date_str_format=date_str_format,
+                                        date_str_include_timezone_offset=date_str_include_timezone_offset)
+    except:
+      date_modified_s = None
+      date_modified_str = None
+    if return_str and not return_epoch_s:
+      return date_modified_str
+    if not return_str and return_epoch_s:
+      return return_epoch_s
+    if return_str and return_epoch_s:
+      return (date_modified_s, date_modified_str)
+    return None
+  
   # Make a copy of the data and optionally return a Segmentations pointer to it.
   def copy(self, new_h5_filepath, include_masks=True,
            open_segmentations_object=True, new_segmentations_object_writable=False, overwrite_destination_hdf5_file_if_exists=False,
