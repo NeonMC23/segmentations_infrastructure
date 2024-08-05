@@ -59,7 +59,9 @@ from collections import OrderedDict
 #   timezone_offset_s = -14400
 #   timezone_offset_str = '-0400'
 def time_s_to_str(time_s, timezone_offset_s=None, timezone_offset_str=None,
-                  use_current_local_time=True, use_current_utc_time=False):
+                  use_current_local_time=True, use_current_utc_time=False,
+                  date_str_format='%Y-%m-%d %H:%M:%S.%f',
+                  date_str_include_timezone_offset=True):
   # Use the local timezone if none was provided.
   if timezone_offset_s is None:
     if use_current_utc_time:
@@ -74,7 +76,7 @@ def time_s_to_str(time_s, timezone_offset_s=None, timezone_offset_str=None,
   # Get "UTC" time, which is actually local time because we will do the timezone offset first.
   time_datetime = datetime.utcfromtimestamp(time_s + timezone_offset_s)
   # Format the string then add the local offset string.
-  return time_datetime.strftime('%%Y-%%m-%%d %%H:%%M:%%S.%%f %s' % timezone_offset_str)
+  return time_datetime.strftime('%s%s' % (date_str_format, ' ' + timezone_offset_str if date_str_include_timezone_offset else ''))
 
 # Convert from a human-readable time string to time as seconds since epoch.
 # The time string should include a timezone offset if applicable, for example '0400' for EDT.
@@ -582,6 +584,32 @@ def falling_edges(x, threshold=0.5, include_first_step_if_low=False, include_las
   if x[-1] > threshold and include_last_step_if_high:
     edges = edges + [len(x)-1]
   return np.array(edges)
+
+# Find nan entries and fill them with the previous non-nan value.
+# Will allow leading nan entries to remain.
+def fill_nans(x):
+  nan_indexes_original = np.where(np.isnan(x))[0]
+  nan_indexes = nan_indexes_original.copy()
+  if np.isnan(x[0]):
+    indexes_toAllow = []
+    for i in range(len(x)):
+      if np.isnan(x[i]):
+        indexes_toAllow.append(i)
+      else:
+        break
+    nan_indexes = np.delete(nan_indexes, indexes_toAllow)
+  while nan_indexes.size > 0:
+    x[nan_indexes] = x[nan_indexes-1]
+    nan_indexes = np.where(np.isnan(x))[0]
+    if np.isnan(x[0]):
+      indexes_toAllow = []
+      for i in range(len(x)):
+        if np.isnan(x[i]):
+          indexes_toAllow.append(i)
+        else:
+          break
+      nan_indexes = np.delete(nan_indexes, indexes_toAllow)
+  return nan_indexes_original
 
 ############################################
 # Printing and Formatting Variables
