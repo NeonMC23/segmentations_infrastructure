@@ -282,6 +282,7 @@ class Segmentations:
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
     self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
     self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
+    self._whale_ids_confidence = self.get_whale_ids_confidence(use_local_copy=False)
     
     # Store the number of frames.
     self._num_frames = 0
@@ -885,6 +886,13 @@ class Segmentations:
       return [bool(is_auto) for is_auto in self._datasets['annotations']['whale_ids']['is_auto_id']]
     return None
   
+  def get_whale_ids_confidence(self, use_local_copy=True):
+    if use_local_copy:
+      return self._whale_ids_confidence
+    if self._h5_file is not None:
+      return [float(confidence) for confidence in self._datasets['annotations']['whale_ids']['confidences']]
+    return None
+  
   # Get the whale ID for a specific whale index or ID number.
   def get_whale_id(self, whale_id_number=None, whale_index=None):
     if whale_id_number is not None:
@@ -909,20 +917,39 @@ class Segmentations:
     return self.get_whale_ids_is_auto()[whale_index]
   
   # Refresh the whale ID numbers to make them sequential.
-  def reassign_whale_id_numbers(self):
-    whale_id_numbers = self.get_whale_id_numbers()
-    if whale_id_numbers is None:
-      return
+  def reassign_whale_id_numbers(self, whale_indexes_to_not_change=[], timestamp_s=None, author=''):
+    if self._h5_file is None:
+      raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
-      return
-    new_id_numbers = list(range(whale_id_numbers.shape[0]))
-    self._datasets['annotations']['whale_ids']['id_numbers'][:,0] = new_id_numbers
+      raise AssertionError('Segmentations was opened in read-only mode')
+    # Add a log entry for the action.
+    author = author or self._author
+    self.add_history_entry(summary='reassign_whale_id_numbers', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
+                           timestamp_s=timestamp_s, author=author)
+    # Assign new ID numbers.
+    whale_id_numbers = list(self.get_whale_id_numbers())
+    new_whale_id_numbers = [None]*len(whale_id_numbers)
+    for whale_index_to_not_change in whale_indexes_to_not_change:
+      new_whale_id_numbers[whale_index_to_not_change] = whale_id_numbers[whale_index_to_not_change]
+    for whale_index in range(len(whale_id_numbers)):
+      if new_whale_id_numbers[whale_index] is not None:
+        continue
+      new_id_number = 0
+      while new_id_number in new_whale_id_numbers:
+        new_id_number += 1
+      new_whale_id_numbers[whale_index] = new_id_number
+    self._datasets['annotations']['whale_ids']['id_numbers'][:,0] = new_whale_id_numbers
+    # Update the date modified.
+    self._update_metadata_dateModified(segmentations=True, annotations=False)
+    # Update the local copy of the whale ID numbers.
     self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
     
   # Assign a whale ID to a whale index.
   def add_annotation_whale_id(self, whale_index, whale_id, is_auto_id=False, frame_bounds=None, confidence=np.nan, notes='', points=None, timestamp_s=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='add_annotation_whale_id', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -955,12 +982,15 @@ class Segmentations:
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
     self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
     self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
+    self._whale_ids_confidence = self.get_whale_ids_confidence(use_local_copy=False)
   
   # Add a behavior annotation.
   def add_annotation_behavior(self, behavior, frame_bounds, whale_indexes_involved, confidence=np.nan, notes='', points=None, timestamp_s=None, author='',
                               annotation_index=None):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='add_annotation_behavior', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -1007,6 +1037,8 @@ class Segmentations:
                            annotation_index=None):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='add_annotation_event', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -1053,6 +1085,8 @@ class Segmentations:
                           annotation_index=None):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='add_annotation_note', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -1109,6 +1143,8 @@ class Segmentations:
         details['whale_id_number'] = whale_id_numbers[details['whale_index']]
       if 'whale_indexes_involved' in details:
         details['whale_id_numbers_involved'] = [whale_id_numbers[w] for w in details['whale_indexes_involved']]
+      if 'whale_indexes_to_not_change' in details:
+        details['whale_id_numbers_to_not_change'] = [whale_id_numbers[w] for w in details['whale_indexes_to_not_change']]
       if 'whale_index_toMove' in details:
         details['whale_id_number_toMove'] = whale_id_numbers[details['whale_index_toMove']]
       if 'whale_index_1' in details:
@@ -1134,6 +1170,8 @@ class Segmentations:
   def delete_annotation_behavior(self, annotation_index_toRemove, timestamp_s=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='delete_annotation_behavior', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -1166,6 +1204,8 @@ class Segmentations:
   def delete_annotation_event(self, annotation_index_toRemove, timestamp_s=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='delete_annotation_event', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -1198,6 +1238,8 @@ class Segmentations:
   def delete_annotation_note(self, annotation_index_toRemove, timestamp_s=None, author=''):
     if self._h5_file is None:
       raise AssertionError('No HDF5 filepath was provided.')
+    if not self._writable:
+      raise AssertionError('Segmentations was opened in read-only mode')
     # Add a log entry for the action.
     author = author or self._author
     self.add_history_entry(summary='delete_annotation_note', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
@@ -1273,6 +1315,7 @@ class Segmentations:
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
     self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
     self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
+    self._whale_ids_confidence = self.get_whale_ids_confidence(use_local_copy=False)
     for group_key in ['notes', 'behaviors', 'events']:
       whale_dimension = 1
       dataset = self._h5_file['annotations'][group_key]['whales_involved']
@@ -1340,13 +1383,13 @@ class Segmentations:
       raise AssertionError('Segmentations was opened in read-only mode')
     if not self.have_masks():
       raise AssertionError('The provided HDF5 file does not have masks.')
+    # Expand datasets if needed for the number of frames and whales.
+    self._expand_datasets(frame_index, whale_index)
     # Add a log entry for the action.
     author = author or self._author
     if log_in_history:
       self.add_history_entry(summary='add_mask', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
                              timestamp_s=time.time(), author=author)
-    # Expand datasets if needed for the number of frames and whales.
-    self._expand_datasets(frame_index, whale_index)
     # Compute the mask contours if a binary mask was provided.
     if mask_matrix is not None and mask_contours is None:
       mask_contours, _ = cv2.findContours(mask_matrix.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -2217,6 +2260,7 @@ class Segmentations:
     self._whale_ids = self.get_whale_ids(use_local_copy=False)
     self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
     self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
+    self._whale_ids_confidence = self.get_whale_ids_confidence(use_local_copy=False)
     for group_key in ['notes', 'behaviors', 'events']:
       dataset = self._h5_file['annotations'][group_key]['whales_involved']
       if need_to_permute:
@@ -2249,6 +2293,7 @@ class Segmentations:
       self._whale_ids = self.get_whale_ids(use_local_copy=False)
       self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
       self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
+      self._whale_ids_confidence = self.get_whale_ids_confidence(use_local_copy=False)
       for group_key in ['notes', 'behaviors', 'events']:
         dataset = self._h5_file['annotations'][group_key]['whales_involved']
         data_1 = dataset[:, whale_index_1]
@@ -3462,6 +3507,7 @@ class Segmentations:
           self._whale_ids = self.get_whale_ids(use_local_copy=False)
           self._whale_id_numbers = self.get_whale_id_numbers(use_local_copy=False)
           self._whale_ids_is_auto = self.get_whale_ids_is_auto(use_local_copy=False)
+          self._whale_ids_confidence = self.get_whale_ids_confidence(use_local_copy=False)
           for group_key in ['notes', 'behaviors', 'events']:
             whale_dimension = 1
             dataset = self._h5_file['annotations'][group_key]['whales_involved']
