@@ -24,6 +24,7 @@
 # [add additional updates and authors as desired]
 #
 ############
+import copy
 
 import decord
 from threading import Thread
@@ -67,7 +68,14 @@ except:
 class DecordVideoReaderWrapper(decord.VideoReader):
   
   def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
+    keys_for_wrapper = ['reset_seek_initial_period_s',
+                        'reset_seek_period_s',
+                        'reset_seek_period_frameReads',]
+    kwargs_for_super = copy.deepcopy(kwargs)
+    for key in keys_for_wrapper:
+      if key in kwargs_for_super:
+        del kwargs_for_super[key]
+    super().__init__(*args, **kwargs_for_super)
     self._video_filepath = args[0]
     self._video_reader_mutex = Lock()
     # Periodically seek the video reader to 0 to limit memory usage.
@@ -75,6 +83,12 @@ class DecordVideoReaderWrapper(decord.VideoReader):
     self._reset_seek_initial_period_s = 0.1
     self._reset_seek_period_s = 0.5
     self._reset_seek_period_frameReads = 150
+    if 'reset_seek_initial_period_s' in kwargs:
+      self._reset_seek_initial_period_s = kwargs['reset_seek_initial_period_s']
+    if 'reset_seek_period_s' in kwargs:
+      self._reset_seek_period_s = kwargs['reset_seek_period_s']
+    if 'reset_seek_period_frameReads' in kwargs:
+      self._reset_seek_period_frameReads = kwargs['reset_seek_period_frameReads']
     self._frame_read_counter = 0
     self._last_reset_poll_time_s = 0
     self._last_frameRead_time_s = 0
@@ -141,7 +155,7 @@ class DecordVideoReaderWrapper(decord.VideoReader):
     while not self._stop_reset_seek_thread:
       while (time.time() - self._last_reset_poll_time_s) < self._reset_seek_period_s \
           and not self._stop_reset_seek_thread:
-        time.sleep(0.1)
+        time.sleep(min([0.1, self._reset_seek_period_s]))
       # If a frame read has occurred recently, consider that as the reset.
       # But mark that frame reading is being performed.
       if time.time() - self._last_frameRead_time_s < self._reset_seek_period_s:

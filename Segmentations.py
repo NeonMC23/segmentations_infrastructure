@@ -528,7 +528,7 @@ class Segmentations:
     future_frame_indexes_with_segmentations = np.where(frames_are_segmented[frame_index+1:])[0]
     if future_frame_indexes_with_segmentations.size == 0:
       return None
-    return future_frame_indexes_with_segmentations[0] + frame_index + 1
+    return int(future_frame_indexes_with_segmentations[0] + frame_index + 1)
   
   # Get the previous frame index with a segmentation.
   def get_previous_frame_index_with_segmentation(self, frame_index):
@@ -538,7 +538,7 @@ class Segmentations:
     previous_frame_indexes_with_segmentations = np.where(frames_are_segmented[0:frame_index])[0]
     if previous_frame_indexes_with_segmentations.size == 0:
       return None
-    return previous_frame_indexes_with_segmentations[-1]
+    return int(previous_frame_indexes_with_segmentations[-1])
     
   ###################################
   # Whale indexes
@@ -1151,6 +1151,8 @@ class Segmentations:
         details['whale_id_number_1'] = whale_id_numbers[details['whale_index_1']]
       if 'whale_index_source' in details:
         details['whale_id_number_source'] = whale_id_numbers[details['whale_index_source']]
+      if 'whale_index_destination' in details:
+        details['whale_id_number_destination'] = whale_id_numbers[details['whale_index_destination']]
     try:
       details = json.dumps(details)
     except TypeError:
@@ -1440,55 +1442,9 @@ class Segmentations:
       return None
     # Load the array into memory.
     mask_contours = np.array(self._datasets['masks'][frame_index, whale_index, :, :, :])
-    # Convert from a matrix to a list of matrices, filtering out nan values.
-    mask_contours = [mask_contours[c, mask_contours[c,:,0] >= 0, :] for c in range(mask_contours.shape[0])]
-    mask_contours = [mask_contour for mask_contour in mask_contours if mask_contour.size > 0]
+    # Convert from a matrix to a list of matrices, filtering out dummy values.
+    mask_contours = get_contours_list_from_contours_matrix(mask_contours)
     return mask_contours
-  
-  # Convert a contour to a dense mask, which is the shape of the frame and all 0s or 1s.
-  def convert_mask_contours_to_dense_mask(self, mask_contours):
-    if self._frame_shape is None:
-      return None
-    # Convert from an np matrix to a list of contours if needed.
-    if isinstance(mask_contours, np.ndarray):
-      mask_contours = [mask_contours[c, mask_contours[c,:,0] >= 0, :] for c in range(mask_contours.shape[0])]
-      mask_contours = [mask_contour for mask_contour in mask_contours if mask_contour.size > 0]
-    # Fill in each contour.
-    dense_mask = np.zeros(self._frame_shape, dtype=np.uint8)
-    dense_mask = cv2.drawContours(dense_mask, mask_contours,
-                                  -1, # -1 means to draw all contours in the given list
-                                  (1,), # value to fill
-                                  -1) # -1 means fill rather than only outline
-    return dense_mask
-  
-  # Check if a point is inside a mask.
-  # Can provide one of the following combinations:
-  #   mask_contours: will check those specific contours.
-  #   frame_index and whale_index: will check the mask for that frame and whale
-  #   frame_index: will return the whale indexes containing the point if there are any
-  def is_point_inside_segmentation(self, point_xy, mask_contours=None, frame_index=None, whale_index=None):
-    if isinstance(point_xy, np.ndarray):
-      point_xy = point_xy.tolist()
-    if mask_contours is not None:
-      # Convert from an np matrix to a list of contours if needed.
-      if isinstance(mask_contours, np.ndarray):
-        mask_contours = [mask_contours[c, mask_contours[c,:,0] >= 0, :] for c in range(mask_contours.shape[0])]
-        mask_contours = [mask_contour for mask_contour in mask_contours if mask_contour.size > 0]
-      # Check if the point is in any of the contours.
-      for contour in mask_contours:
-        if cv2.pointPolygonTest(contour, point_xy, False) >= 0: # inside or on the edge
-          return True
-      return False
-    elif frame_index is not None and whale_index is not None:
-      mask_contours = self.get_mask_contours(frame_index, whale_index)
-      return self.is_point_inside_segmentation(point_xy, mask_contours=mask_contours)
-    elif frame_index is not None:
-      whale_indexes = []
-      for whale_index in range(self.get_num_whales()):
-        if self.is_point_inside_segmentation(point_xy, frame_index=frame_index, whale_index=whale_index):
-          whale_indexes.append(whale_index)
-      return whale_indexes
-    return None
   
   # Get all masks for a desired frame.
   # If as_dict is True, will return a dictionary mapping whale index to mask.
@@ -1574,6 +1530,101 @@ class Segmentations:
       self._whale_segmentations_exist[frame_index, whale_index] = np.any(mask_contours >= 0)
     self._update_metadata_dateModified(segmentations=True, annotations=False)
   
+  # Convert a contour to a dense mask, which is the shape of the frame and all 0s or 1s.
+  def convert_mask_contours_to_dense_mask(self, mask_contours):
+    if self._frame_shape is None:
+      return None
+    # Convert from a matrix to a list of matrices, filtering out dummy values.
+    mask_contours = get_contours_list_from_contours_matrix(mask_contours)
+    # Fill in each contour.
+    dense_mask = np.zeros(self._frame_shape, dtype=np.uint8)
+    dense_mask = cv2.drawContours(dense_mask, mask_contours,
+                                  -1, # -1 means to draw all contours in the given list
+                                  (1,), # value to fill
+                                  -1) # -1 means fill rather than only outline
+    return dense_mask
+  
+  # Check if a point is inside a mask.
+  # Can provide one of the following combinations:
+  #   mask_contours: will check those specific contours.
+  #   frame_index and whale_index: will check the mask for that frame and whale
+  #   frame_index: will return the whale indexes containing the point if there are any
+  def is_point_inside_segmentation(self, point_xy, mask_contours=None, frame_index=None, whale_index=None):
+    if isinstance(point_xy, np.ndarray):
+      point_xy = point_xy.tolist()
+    if mask_contours is not None:
+      # Convert from a matrix to a list of matrices, filtering out dummy values.
+      mask_contours = get_contours_list_from_contours_matrix(mask_contours)
+      # Check if the point is in any of the contours.
+      for contour in mask_contours:
+        if cv2.pointPolygonTest(contour, point_xy, False) >= 0: # inside or on the edge
+          return True
+      return False
+    elif frame_index is not None and whale_index is not None:
+      mask_contours = self.get_mask_contours(frame_index, whale_index)
+      return self.is_point_inside_segmentation(point_xy, mask_contours=mask_contours)
+    elif frame_index is not None:
+      whale_indexes = []
+      for whale_index in range(self.get_num_whales()):
+        if self.is_point_inside_segmentation(point_xy, frame_index=frame_index, whale_index=whale_index):
+          whale_indexes.append(whale_index)
+      return whale_indexes
+    return None
+  
+  # Compute the minimum distance between two masks.
+  # Will return -1 if the masks overlap.
+  # Will return np.nan if one of the masks is empty.
+  def compute_masks_distance(self, frame_index, whale_index_1, whale_index_2):
+    mask_contours_1 = self.get_mask_contours(frame_index=frame_index, whale_index=whale_index_1)
+    mask_contours_2 = self.get_mask_contours(frame_index=frame_index, whale_index=whale_index_2)
+    return compute_masks_distance(mask_contours_1, mask_contours_2)
+  
+  # Compute the distance matrix among all whales in a specified frame.
+  # Elements of the distance matrix will be:
+  #   -1 if the masks overlap
+  #   nan if at least one of the whales in that pair was not present
+  #   otherwise, a positive number indicating the minimum distance between the masks for that whale pair
+  def compute_masks_distance_matrix(self, frame_index):
+    num_whales = self.get_num_whales()
+    mask_contours = self.get_masks_contours(frame_index=frame_index)
+    distance_matrix = np.empty(shape=(num_whales, num_whales), dtype=float)
+    for whale_index_1 in range(num_whales):
+      mask_contours_1 = mask_contours[whale_index_1]
+      for whale_index_2 in range(whale_index_1, num_whales):
+        if whale_index_1 == whale_index_2:
+          distance_matrix[whale_index_1, whale_index_2] = -1
+        else:
+          mask_contours_2 = mask_contours[whale_index_2]
+          distance_matrix[whale_index_1, whale_index_2] = compute_masks_distance(mask_contours_1, mask_contours_2)
+          distance_matrix[whale_index_2, whale_index_1] = distance_matrix[whale_index_1, whale_index_2]
+    return distance_matrix
+  
+  # Compute the intersection over union of specified whales.
+  # If return_dense_masks is False, will return the IOU.
+  # If return_dense_masks is True, will return (IOU, dense_masks).
+  # Will return nan or (nan, nan) if at least one mask is empty.
+  def compute_masks_iou(self, frame_index, whale_indexes, return_dense_masks=False):
+    list_of_mask_contours = []
+    for whale_index in whale_indexes:
+      list_of_mask_contours.append(self.get_mask_contours(frame_index=frame_index, whale_index=whale_index))
+    return compute_masks_iou(list_of_mask_contours, return_dense_masks=return_dense_masks)
+  
+  # Compute the intersection over union for each pair of whales.
+  # An entry will be nan if one of the whales in that pair was not in the frame.
+  def compute_masks_iou_matrix(self, frame_index):
+    masks_contours = [mask_contours for mask_contours in self.get_masks_contours(frame_index=frame_index)]
+    (dense_masks, _) = get_dense_masks_for_contours(list_of_mask_contours=masks_contours)
+    num_whales = self.get_num_whales()
+    iou_matrix = np.empty(shape=(num_whales, num_whales), dtype=float)
+    for whale_index_1 in range(num_whales):
+      for whale_index_2 in range(whale_index_1, num_whales):
+        if whale_index_1 == whale_index_2:
+          iou_matrix[whale_index_1, whale_index_2] = 1
+        else:
+          iou_matrix[whale_index_1, whale_index_2] = compute_masks_iou(
+              list_of_dense_masks=[dense_masks[whale_index_1], dense_masks[whale_index_2]])
+          iou_matrix[whale_index_2, whale_index_1] = iou_matrix[whale_index_1, whale_index_2]
+    return iou_matrix
   
   ###############################
   # Bounding boxes
@@ -3563,3 +3614,119 @@ class Segmentations:
   def __del__(self):
     # print('Closing the Segmentations since the object is being deleted')
     self.close(author='[object_deleted] [%s]' % self._author)
+
+
+###############################
+# Static methods
+###############################
+
+# Convert a contour to a dense mask, which is the shape of the frame and all 0s or 1s.
+def get_contours_list_from_contours_matrix(contours):
+  # Return an empty list if there are no contours.
+  if contours is None:
+    return []
+  # Convert from 3D array to list of arrays if needed.
+  if isinstance(contours, np.ndarray):
+    contours = list(contours)
+  # -1 is the dummy value, so exclude those then only keep non-empty contours.
+  contours = [contour[contour[:,0] >= 0, :] for contour in contours]
+  contours = [contour for contour in contours if contour.size > 0]
+  return contours
+
+# Convert multiple sets of mask contours to dense masks.
+# Each element of list_of_mask_contours can be a numpy matrix of contours or a list of contours.
+# Will generate an image with 0s and 1s for each mask.
+# Every image will be the same shape.
+# The image will only be as big as needed to contain all masks.
+# Will return (list_of_dense_masks, roi_min_xy)
+#  Where roi_min_xy is the upper left corner of the returned image in original frame coordinates.
+# Will return (None, None) if all contours are empty.
+def get_dense_masks_for_contours(list_of_mask_contours):
+  for (masks_index, mask_contours) in enumerate(list_of_mask_contours):
+    list_of_mask_contours[masks_index] = get_contours_list_from_contours_matrix(mask_contours)
+  if sum([len(mask_contours) for mask_contours in list_of_mask_contours]) == 0:
+    return (None, None)
+  # Create an image that is only as big as needed to fit all masks.
+  all_mask_contours = [x for xs in list_of_mask_contours for x in xs]
+  roi_min_xy = np.min(np.stack([np.min(contour, axis=0) for contour in all_mask_contours], axis=0), axis=0)
+  roi_max_xy = np.max(np.stack([np.max(contour, axis=0) for contour in all_mask_contours], axis=0), axis=0)
+  roi_img = np.zeros(shape=(roi_max_xy[1] - roi_min_xy[1], roi_max_xy[0] - roi_min_xy[0]), dtype=np.uint8)
+  # Create a dense mask for each mask.
+  dense_masks = []
+  for (masks_index, mask_contours) in enumerate(list_of_mask_contours):
+    # Shift contour coordinates to the cropped image.
+    mask_contours = [contour - roi_min_xy for contour in mask_contours]
+    # Fill the mask region with 1s.
+    dense_masks.append(cv2.drawContours(
+        np.zeros_like(roi_img), mask_contours,
+        -1,   # -1 means to draw all contours in the given list
+        (1,), # value to fill
+        -1),  # -1 means fill rather than only outline
+    )
+  # Return the dense masks.
+  return (dense_masks, roi_min_xy)
+
+# Determine the intersection over union for a list of masks.
+# Must provide either the contours OR the dense masks.
+# If return_dense_masks is False, will return the IOU.
+# If return_dense_masks is True, will return (IOU, dense_masks).
+# Will return nan or (nan, nan) if at least one mask is empty.
+def compute_masks_iou(list_of_mask_contours=None, list_of_dense_masks=None, return_dense_masks=False):
+  # Convert to dense masks if needed.
+  if list_of_dense_masks is None:
+    (list_of_dense_masks, _) = get_dense_masks_for_contours(list_of_mask_contours)
+  # Check if a mask is empty.
+  if list_of_dense_masks is None or True in [~np.any(list_of_dense_masks[i]) for i in range(len(list_of_dense_masks))]:
+    if return_dense_masks:
+      return (np.nan, np.nan)
+    else:
+      return np.nan
+  # Calculate the intersection over union.
+  masks_sum = np.sum(list_of_dense_masks, axis=0)
+  intersection = np.sum(masks_sum == len(list_of_dense_masks))
+  union = np.sum(masks_sum > 0)
+  iou = intersection/union # Note that union is nonzero since we already checked that at least one mask is not empty
+  if return_dense_masks:
+    return (iou, list_of_dense_masks)
+  else:
+    return iou
+
+# Compute the minimum distance between two masks.
+# Will return -1 if the masks overlap.
+# Will return np.nan if one of the masks is empty.
+def compute_masks_distance(mask_contours_1, mask_contours_2):
+  # Convert from a matrix to a list of matrices, filtering out dummy values.
+  mask_contours_1 = get_contours_list_from_contours_matrix(mask_contours_1)
+  mask_contours_2 = get_contours_list_from_contours_matrix(mask_contours_2)
+  if len(mask_contours_1) == 0 or len(mask_contours_2) == 0:
+    return np.nan
+  # Loop through all contours to compute the minimum pairwise distance.
+  minimum_distance = None
+  for mask_contour_1 in mask_contours_1:
+    for mask_contour_2 in mask_contours_2:
+      # Compute the distance from each point on contour 1 to the boundary of contour 2.
+      for point_index_1 in range(mask_contour_1.shape[0]):
+        point_1 = [int(a) for a in mask_contour_1[point_index_1, :]]
+        distance = cv2.pointPolygonTest(mask_contour_2, point_1, True)
+        if distance > 0: # the point is inside the contour
+          return -1
+        distance = abs(distance)
+        if minimum_distance is None or distance < minimum_distance:
+          minimum_distance = distance
+      # Compute the distance from each point on contour 2 to the boundary of contour 1.
+      for point_index_2 in range(mask_contour_2.shape[0]):
+        point_2 = [int(a) for a in mask_contour_2[point_index_2, :]]
+        distance = cv2.pointPolygonTest(mask_contour_1, point_2, True)
+        if distance > 0: # the point is inside the contour
+          return -1
+        distance = abs(distance)
+        if minimum_distance is None or distance < minimum_distance:
+          minimum_distance = distance
+  return minimum_distance
+
+
+
+
+
+
+
