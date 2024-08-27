@@ -3627,6 +3627,8 @@ def get_contours_list_from_contours_matrix(contours):
     return []
   # Convert from 3D array to list of arrays if needed.
   if isinstance(contours, np.ndarray):
+    if contours.ndim == 2:
+      contours = contours[None, :]
     contours = list(contours)
   # -1 is the dummy value, so exclude those then only keep non-empty contours.
   contours = [contour[contour[:,0] >= 0, :] for contour in contours]
