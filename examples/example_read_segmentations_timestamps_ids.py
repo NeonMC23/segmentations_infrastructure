@@ -43,9 +43,17 @@ drone_data_hdf5_filepaths = {
   'DSWP': os.path.join(drone_data_dir, 'DSWP-DJI_MAVIC3-2_metadata.hdf5'),
 }
 
-# Define a baby epoch if desired.
+# Define a baby epoch for fetching timestamps in that reference frame.
 # Can also be None if it will not be used.
 baby_epoch_s = time_str_to_time_s('2023-07-08 11:45:45 -0400')
+
+# Define functions for extracting birth regions.
+in_birth_regions_functions = {
+  'Before Birth': lambda x: (x <= -33*60),
+  'During Birth': lambda x: (-33*60 <= x) & (x <= 0),
+  'After Birth': lambda x: (0 <= x) & (x <= 60*(2*60+15)),
+  'After After Birth': lambda x: (x >= 60*(2*60+15)),
+}
 
 # Specify a video to use for the below examples.
 video_key_for_examples = '1688832540499'
@@ -116,6 +124,20 @@ print()
 print('See timestamps for video %s' % (video_key_for_examples))
 print('  Start time: %s | epoch time %0.3fs | baby time %0.3fs' % (timestamps_str[0], timestamps_s[0], timestamps_s_babyTime[0]))
 print('  End time  : %s | epoch time %0.3fs | baby time %0.3fs' % (timestamps_str[-1], timestamps_s[-1], timestamps_s_babyTime[-1]))
+
+#########################################
+# Example usage: birth regions
+#########################################
+
+print()
+print('Checking birth regions for video %s' % (video_key_for_examples))
+max_birth_region_str_length = max([len(birth_region) for birth_region in in_birth_regions_functions])
+for (birth_region, in_birth_region_function) in in_birth_regions_functions.items():
+  is_birth_region = in_birth_regions_functions[birth_region](timestamps_s_babyTime)
+  birth_region_indexes = np.where(is_birth_region)
+  print('  %s: %5d frames' % (birth_region.ljust(max_birth_region_str_length),
+                              np.sum(is_birth_region)))
+
 
 #########################################
 # Example usage: various segmentation helpers
