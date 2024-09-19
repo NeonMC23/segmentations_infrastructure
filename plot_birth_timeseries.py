@@ -160,8 +160,9 @@ def plot_birth_timeseries(
     legend_lines = []
     legend_labels = []
     xlabel_text = None
+    ylabel_text = None
   else:
-    (fig, axs_all, ax_regions_xlims_s, subplot_width_ratios, legend_lines, legend_labels, xlabel_text) = previous_handles
+    (fig, axs_all, ax_regions_xlims_s, subplot_width_ratios, legend_lines, legend_labels, xlabel_text, ylabel_text) = previous_handles
     axs = axs_all[subplot_row_index]
     previous_legend_labels = legend_labels.copy()
   is_last_subplot_row = subplot_row_index == num_subplot_rows-1
@@ -349,12 +350,14 @@ def plot_birth_timeseries(
                            ha='center', va='top', fontsize=label_fontsize)
     # Add a y label on centered on the side.
     if ylabel is not None:
+      if ylabel_text is not None:
+        ylabel_text.set_visible(False)
       tick_labels_bbox = axs[0].get_yticklabels()[0].get_window_extent(renderer=fig.canvas.get_renderer())
       tick_labels_coord = tick_labels_bbox.transformed(fig.transFigure.inverted())
       tick_labels_left_x = tick_labels_coord.x0
-      fig.text(tick_labels_left_x, 0.5,
-               ylabel, rotation='vertical',
-               ha='right', va='center', fontsize=label_fontsize)
+      ylabel_text = fig.text(tick_labels_left_x, 0.5,
+                             ylabel, rotation='vertical',
+                             ha='right', va='center', fontsize=label_fontsize)
   
   # Save the plot.
   if output_filepath is not None:
@@ -364,7 +367,7 @@ def plot_birth_timeseries(
     fig.savefig(output_filepath, dpi=300)
   
   # Return the handles for future updates.
-  return (fig, axs_all, ax_regions_xlims_s, subplot_width_ratios, legend_lines, legend_labels, xlabel_text)
+  return (fig, axs_all, ax_regions_xlims_s, subplot_width_ratios, legend_lines, legend_labels, xlabel_text, ylabel_text)
 
 ###################################################
 # Compute the breakpoints for the plot regions.
