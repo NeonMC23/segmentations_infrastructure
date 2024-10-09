@@ -3225,6 +3225,8 @@ class Segmentations:
         if centroid_xy is not None:
           cv2.circle(img_bgr_annotated, [round(point) for point in centroid_xy],
                      circle_radius, (255, 255, 255), -1)
+          cv2.circle(img_bgr_annotated, [round(point) for point in centroid_xy],
+                     circle_radius, (0, 0, 0), max([1, circle_radius//3]))
       # Draw the orientation color-coded by orientation confidence.
       if show_orientations:
         (orientation_rad, orientation_confidence) = self.get_orientation_rad_confidence(frame_index=frame_index, whale_index=whale_index)
@@ -3613,7 +3615,11 @@ class Segmentations:
 
   def __del__(self):
     # print('Closing the Segmentations since the object is being deleted')
-    self.close(author='[object_deleted] [%s]' % self._author)
+    try:
+      self.close(author='[object_deleted] [%s]' % self._author)
+    except ImportError:
+      # The file was likely already closed.
+      pass
 
 
 ###############################
