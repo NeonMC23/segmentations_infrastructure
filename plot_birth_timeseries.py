@@ -46,10 +46,10 @@ baby_epoch_s = time_str_to_time_s('2023-07-08 11:45:45 -0400')
 
 # Define functions for extracting analysis regions.
 in_analysis_regions_functions = {
-  'Before Birth': lambda x: (x <= -33*60),
-  'During Birth': lambda x: (-33*60 <= x) & (x <= 0),
-  'After Birth': lambda x: (0 <= x) & (x <= 60*(2*60+15)),
-  'After After Birth': lambda x: (x >= 60*(2*60+15)),
+  'Before Birth': lambda x: (x < -33*60),
+  'During Birth': lambda x: (-33*60 <= x) & (x < 0),
+  'After Birth': lambda x: (0 <= x) & (x < 60*(2*60+35)),
+  'After After Birth': lambda x: (x >= 60*(2*60+35)),
 }
 
 # Define plot colors for the analysis regions.
