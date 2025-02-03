@@ -112,6 +112,9 @@ def plot_birth_timeseries(
     # Whether to show spines and gray shading between broken subplots.
     show_gap_spines=False,
     show_gap_shading=True,
+    show_axis_break_slants=True,
+    # Custom y axis tick labels.
+    y_tick_custom_label_dict=None,
     # The maximum number of columns in the legend.
     legend_ncols=6,
     # The previous output of this function, to add this series to that graph.
@@ -311,20 +314,21 @@ def plot_birth_timeseries(
                               facecolor=[0.7, 0.7, 0.7], fill=True,
                               transform=ax.transAxes, clip_on=False))
     
-    # # Add the cut-out diagonal lines.
-    # # In axes coordinates, which are always between 0-1,
-    # # spine endpoints are at these locations: (0, 0), (0, 1), (1, 0), and (1, 1).
-    # if axis_index < len(axs)-1:
-    #   dx = 0.015  # how big to make the diagonal lines in axes coordinates
-    #   dy = 0.015  # how big to make the diagonal lines in axes coordinates
-    #   diag_plot_kwargs = dict(transform=ax.transAxes, color='k', clip_on=False)
-    #   ax.plot((1-dx, 1+dy), (-dx, +dy), **diag_plot_kwargs)
-    #   ax.plot((1-dx, 1+dy), (1-dx, 1+dy), **diag_plot_kwargs)
-    #
-    #   ax2 = axs[axis_index+1]
-    #   diag_plot_kwargs.update(transform=ax2.transAxes)
-    #   ax2.plot((-dx, +dy), (1-dx, 1+dy), **diag_plot_kwargs)
-    #   ax2.plot((-dx, +dy), (-dx, +dy), **diag_plot_kwargs)
+    # Add the cut-out diagonal lines.
+    # In axes coordinates, which are always between 0-1,
+    # spine endpoints are at these locations: (0, 0), (0, 1), (1, 0), and (1, 1).
+    if show_axis_break_slants:
+      dy = 0.01  # how big to make the diagonal lines in axes coordinates
+      slant_angle_deg = 45
+      aspect_ratio = np.diff(ax.get_ylim())[0] / np.diff(ax.get_xlim())[0]
+      dx = dy / np.tan(np.deg2rad(slant_angle_deg)) * aspect_ratio
+      diag_plot_kwargs = dict(transform=ax.transAxes, color='k', clip_on=False)
+      if axis_index < len(axs)-1:
+        ax.plot((1-dx, 1+dy), (-dy, +dy), **diag_plot_kwargs)
+        ax.plot((1-dx, 1+dy), (1-dy, 1+dy), **diag_plot_kwargs)
+      if axis_index > 0:
+        ax.plot((-dx, +dy), (1-dy, 1+dy), **diag_plot_kwargs)
+        ax.plot((-dx, +dy), (-dy, +dy), **diag_plot_kwargs)
     
     # Adjust spacing between subplots.
     # f.subplots_adjust(hspace=...) or plt.subplot_tool()
@@ -332,6 +336,21 @@ def plot_birth_timeseries(
     # Hide x axis tick labels if not the last subplot.
     if num_subplot_rows > 1 and not is_last_subplot_row:
       ax.set_xticklabels([])
+      
+    # Set custom y tick labels if desired.
+    if y_tick_custom_label_dict is not None:
+      y_lim = ax.get_ylim()
+      yticks = ax.get_yticks().tolist()
+      custom_labels = [f"{int(t)}" for t in yticks]  # Default labels
+      for (y_tick_value, y_tick_label) in y_tick_custom_label_dict.items():
+        if y_tick_value in yticks:
+          modified_label_index = yticks.index(y_tick_value)
+          custom_labels[modified_label_index] = y_tick_label  # Modify the desired label
+      ax.set_yticks(yticks)
+      ax.set_yticklabels(custom_labels)
+      ax.set_ylim(y_lim)
+      # ax.yaxis.labelpad = 20 # Increase spacing between y-axis label and tick labels
+      # ax.yaxis.position = (0, 0.2) # Increase spacing between y-axis label and tick labels
       
     if title is not None:
       plt.suptitle(title, fontsize=title_fontsize)
@@ -348,17 +367,17 @@ def plot_birth_timeseries(
     xlabel_text = fig.text(0.5, tick_labels_bottom_y-0.01,
                            'Time Since Birth Completed [minutes]',
                            ha='center', va='top', fontsize=label_fontsize)
-    # Add a y label on centered on the side.
+    # Add a y label centered on the side.
     if ylabel is not None:
       if ylabel_text is not None:
         ylabel_text.set_visible(False)
       tick_labels_bbox = axs[0].get_yticklabels()[0].get_window_extent(renderer=fig.canvas.get_renderer())
       tick_labels_coord = tick_labels_bbox.transformed(fig.transFigure.inverted())
       tick_labels_left_x = tick_labels_coord.x0
-      ylabel_text = fig.text(tick_labels_left_x, 0.5,
+      ylabel_text = fig.text(tick_labels_left_x-0.03*(y_tick_custom_label_dict is not None), 0.5,
                              ylabel, rotation='vertical',
                              ha='right', va='center', fontsize=label_fontsize)
-  
+    
   # Save the plot.
   if output_filepath is not None:
     output_dir = os.path.realpath(os.path.split(output_filepath)[0])
