@@ -1,4 +1,30 @@
 
+############
+#
+# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+# IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
+# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
+# [add additional updates and authors as desired]
+#
+############
+
 import matplotlib
 default_matplotlib_backend = 'qt5agg' #matplotlib.rcParams['backend']
 # Avoid type 3 fonts, which can cause issues in some systems (and some paper submission systems).
@@ -45,6 +71,12 @@ def time_str_to_time_s(time_str):
 baby_epoch_s = time_str_to_time_s('2023-07-08 11:45:45 -0400')
 
 # Define functions for extracting analysis regions.
+analysis_region_startEnd_times_babyEpoch_s = {
+  'Before Birth': [-1440*60, -33*60],
+  'During Birth': [-33*60, 0],
+  'After Birth': [0, 60*(2*60+35)],
+  'After After Birth': [60*(2*60+35), 1440*60],
+}
 in_analysis_regions_functions = {
   'Before Birth': lambda x: (x < -33*60),
   'During Birth': lambda x: (-33*60 <= x) & (x < 0),
@@ -53,11 +85,17 @@ in_analysis_regions_functions = {
 }
 
 # Define plot colors for the analysis regions.
+# analysis_region_colors = {
+#   'Before Birth'     : 'tab:blue',
+#   'During Birth'     : 'tab:orange',
+#   'After Birth'      : 'tab:green',
+#   'After After Birth': 'tab:red',
+# }
 analysis_region_colors = {
   'Before Birth'     : 'tab:blue',
   'During Birth'     : 'tab:orange',
-  'After Birth'      : 'tab:green',
-  'After After Birth': 'tab:red',
+  'After Birth'      : list(np.array([44, 160, 137])/255), # 'tab:green'
+  'After After Birth': list(np.array([214, 71, 40])/255), # 'tab:red',
 }
 
 # Define default axis regions for the broken plot.
@@ -412,8 +450,7 @@ def recompute_birth_timeseries_breakpoints(gap_threshold_s=5*60,
       'DSWP': os.path.join(drone_data_dir, 'DSWP-DJI_MAVIC3-2_metadata.hdf5'),
     }
   if segmentations_data_dir is None:
-    # segmentations_data_dir = os.path.join(current_script_dir, '..', 'data', 'segmentations')
-    segmentations_data_dir = 'C:/Users/jdelp/Desktop/_whale_birthday_s3_data/_current_segmentations_fromWhaleTales'
+    segmentations_data_dir = os.path.join(current_script_dir, '..', 'data', 'segmentations')
   
   # Open an instance for getting video metadata including timestamps.
   droneVideos = DroneVideos(

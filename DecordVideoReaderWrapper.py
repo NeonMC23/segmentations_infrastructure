@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2024 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,10 +20,11 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2024 by Joseph DelPreto [https://josephdelpreto.com].
+# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
 # [add additional updates and authors as desired]
 #
 ############
+
 import copy
 
 import decord
@@ -189,11 +190,9 @@ if __name__ == '__main__':
   import cv2
   import numpy as np
   
-  gps_video_filepath = 'P:/MIT/Lab/Whales/csail_data_processing/data/drones/drone_GPS_paths_60s_step5s_300dpi_8x8in.mp4'
-  video_filepath = os.path.join('P:/MIT/Lab/Whales/csail_data_processing/interactive_web_segmentation_visualizer_annotator/data',
-                                '1688830681602.MP4')
-  # video_reader = decord.VideoReader(gps_video_filepath)
-  video_reader = DecordVideoReaderWrapper(gps_video_filepath)
+  video_filepath = 'test_video_filepath'
+  # video_reader = decord.VideoReader(video_filepath)
+  video_reader = DecordVideoReaderWrapper(video_filepath)
   frame_shape = video_reader[0].asnumpy().shape
   cv2.waitKey(3000)
   

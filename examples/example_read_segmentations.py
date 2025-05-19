@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2024 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,7 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2024 by Joseph DelPreto [https://josephdelpreto.com].
+# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
 # [add additional updates and authors as desired]
 #
 ############
@@ -38,24 +38,17 @@ from segmentation_infrastructure.helpers.helpers_various import *
 
 current_script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir = os.path.join(current_script_dir, '..', 'data')
+segmentations_dir = os.path.join(data_dir, 'segmentations')
+videos_dir = os.path.join(data_dir, 'videos')
 video_num = 1688829151574
-# video_num = 1688830960531
-h5_filepath = os.path.join(data_dir, 'segmentations',
+
+h5_filepath = os.path.join(segmentations_dir,
                            '%013d_segmentations.hdf5' % video_num)
-# h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format_chunked32',
-#                            '%013d_segmentations.hdf5' % video_num)
-# h5_filepath = os.path.join(data_dir, 'segmentations', 'old_format_2024-03-15', 'new_format',
-#                            # '1688829151574_segmentations_chunkTest16-1-16-1024-2 - Copy.hdf5')
-#                            # '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo.hdf5')
-#                            '1688829151574_segmentations_chunkTest64-1-16-1024-2_adjustOthersToo_2 - Copy.hdf5')
 
 # If you would not like to read videos, you can just define an empty dictionary:
 # video_filepaths = {}
 video_filepaths = {
-  'original'                : os.path.join(data_dir, '%013d_compressed.mp4' % video_num),
-  # 'only_masks'              : os.path.join(data_dir, '%013d_segmentations.mp4' % video_num),
-  # 'masks_boxes_vectors'     : os.path.join(data_dir, '%013d_segmentations_boundingBoxes_orientations.mp4' % video_num),
-  # 'masks_splitBoxes_vectors': os.path.join(data_dir, '%013d_segmentations_boundingBoxes_head_fluke.mp4' % video_num),
+  'original'                : os.path.join(videos_dir, '%013d.mp4' % video_num),
 }
 
 # If using videos, will scale example outputs to fit on the monitor.

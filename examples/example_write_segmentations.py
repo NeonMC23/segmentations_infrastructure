@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2024 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,7 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2024 by Joseph DelPreto [https://josephdelpreto.com].
+# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
 # [add additional updates and authors as desired]
 #
 ############
@@ -33,12 +33,15 @@ from segmentation_infrastructure.Segmentations import Segmentations
 # Configuration
 current_script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir = os.path.join(current_script_dir, '..', 'data')
-video_num = 0 # e.g. 1688827433752
-h5_filepath = os.path.join(data_dir, 'segmentations', '%013d_segmentations.hdf5' % video_num)
+segmentations_dir = os.path.join(data_dir, 'segmentations')
+videos_dir = os.path.join(data_dir, 'videos')
+video_num = 1688829151574
+
+h5_filepath = os.path.join(segmentations_dir, '%013d_segmentations.hdf5' % video_num)
 video_filepaths = { # the keys can be anything you want
-  'masks_boxes_vectors': os.path.join(data_dir, 'segmentations', '%013d_segmentations_boundingBoxes_orientations.mp4' % video_num),
-  'only_masks':          os.path.join(data_dir, 'segmentations', '%013d_segmentations.mp4' % video_num),
+  'original': os.path.join(videos_dir, '%013d.mp4' % video_num),
 }
+
 mask_shape = (1407, 2500) # video frame (height, width)
 
 # Remove existing outputs.

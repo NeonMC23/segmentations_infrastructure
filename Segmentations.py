@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2024 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,7 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2024 by Joseph DelPreto [https://josephdelpreto.com].
+# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
 # [add additional updates and authors as desired]
 #
 ############
@@ -483,7 +483,7 @@ class Segmentations:
     return self._frame_shape
   
   # Get a matrix entry index with a segmentation close to the desired frame index, within an optional tolerance.
-  def get_closest_frame_index_with_segmentation(self, frame_index, distance_threshold=0):
+  def get_closest_frame_index_with_segmentation(self, frame_index, distance_threshold=None):
     frames_are_segmented = self.get_frames_are_segmented()
     if frames_are_segmented is None:
       return None
@@ -514,7 +514,7 @@ class Segmentations:
           best_index = index_candidates[1]
     # Check if the closest index is within the threshold region of the target.
     distance = np.abs(frame_indexes_with_segmentations[best_index] - frame_index)
-    if distance < distance_threshold:
+    if distance_threshold is None or distance < distance_threshold:
       # We found a good index!
       return frame_indexes_with_segmentations[best_index]
     # No entry was found to be close enough.
@@ -3126,7 +3126,10 @@ class Segmentations:
     if frame_index < 0 or frame_index >= self._num_video_frames[video_key]:
       raise ValueError('Invalid frame index %d for video [%s] with %d total frames'%(frame_index, video_key, self._num_video_frames[video_key]))
     # Load the video frame.
-    img_rgb = self._video_readers[video_key][frame_index].asnumpy()
+    img_rgb = self._video_readers[video_key][frame_index]
+    if img_rgb is None:
+      return None
+    img_rgb = img_rgb.asnumpy()
     
     # Resize the image to match the mask shape if desired.
     annotating_img = show_masks or show_centroids or show_orientations or (show_boxes is not None) or show_whale_id_numbers or show_whale_indexes
@@ -3152,8 +3155,10 @@ class Segmentations:
   #  If graphing, will use the provided figure if one is provided.
   #  If the image Frame is None and no masks are stored in the segmentations, graph will be True.
   def visualize_segmentations(self, frame_index, img_rgb=None, graph=False, fig=None,
-                              show_masks=False, show_centroids=False,
-                              show_orientations=False, show_boxes=None,
+                              show_masks=False, mask_outline_indicate_id_exists=True,
+                              show_centroids=False,
+                              show_orientations=False,
+                              show_boxes=None, full_box_color_indicate_id_exists=True,
                               show_whale_id_numbers=False, show_whale_indexes=False):
     # If no image is provided and there are no masks, use graphing.
     if img_rgb is None and not self.have_masks():
@@ -3162,9 +3167,11 @@ class Segmentations:
     # Create an image or a plot with the visualizations.
     if not graph:
       return self.visualize_segmentations_on_image(frame_index=frame_index, img_rgb=img_rgb,
-                                                    show_masks=show_masks, show_centroids=show_centroids,
-                                                    show_orientations=show_orientations, show_boxes=show_boxes,
-                                                    show_whale_id_numbers=show_whale_id_numbers, show_whale_indexes=show_whale_indexes)
+                                                   show_masks=show_masks, mask_outline_indicate_id_exists=mask_outline_indicate_id_exists,
+                                                   show_centroids=show_centroids,
+                                                   show_orientations=show_orientations,
+                                                   show_boxes=show_boxes, full_box_color_indicate_id_exists=full_box_color_indicate_id_exists,
+                                                   show_whale_id_numbers=show_whale_id_numbers, show_whale_indexes=show_whale_indexes)
     else:
       return self.visualize_segmentations_on_graph(frame_index=frame_index, fig=fig,
                                                     show_masks=show_masks, show_centroids=show_centroids,
@@ -3174,9 +3181,11 @@ class Segmentations:
   # Add segmentation visualizations to a frame.
   # If the image frame is None, will draw on a black image.
   def visualize_segmentations_on_image(self, frame_index, img_rgb=None,
-                                        show_masks=False, show_centroids=False,
-                                        show_orientations=False, show_boxes=None,
-                                        show_whale_id_numbers=False, show_whale_indexes=False):
+                                       show_masks=False, mask_outline_indicate_id_exists=True,
+                                       show_centroids=False,
+                                       show_orientations=False,
+                                       show_boxes=None, full_box_color_indicate_id_exists=True,
+                                       show_whale_id_numbers=False, show_whale_indexes=False):
     # Create a black image if no frame was provided.
     if img_rgb is None:
       img_rgb = np.zeros((*self.get_frame_shape(), 3), dtype=np.uint8)
@@ -3186,9 +3195,11 @@ class Segmentations:
       img_rgb = scale_image(img_rgb, target_width=self._frame_shape[1], target_height=self._frame_shape[0], maintain_aspect_ratio=False)
     
     # Define sizes based on the frame size.
-    linewidth_thicker = round(img_rgb.shape[0]*0.01)
-    linewidth_thinner = round(linewidth_thicker*3/4)
-    circle_radius = round(img_rgb.shape[0]*0.01)
+    linewidth_thicker = round(img_rgb.shape[0]*0.004)
+    linewidth_thinner = round(linewidth_thicker*0.5)
+    circle_radius = round(img_rgb.shape[0]*0.0075)
+    color_with_ID = (255, 255, 255)
+    color_no_ID = (255, 50, 255)
     mask_alpha = 0.5
     
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
@@ -3197,11 +3208,20 @@ class Segmentations:
       # Draw the bounding boxes.
       if show_boxes is not None:
         bounding_box_colors = {'full': (255,255,255), 'head': (255,255,0), 'tail':(255,0,255)}
+        if full_box_color_indicate_id_exists:
+          bounding_box_colors['full'] = color_no_ID
+          if len(self.get_whale_id(whale_index=whale_index)) > 0:
+            if not self.get_whale_ids_is_auto()[whale_index]:
+              bounding_box_colors['full'] = color_with_ID
         for bounding_box_key in show_boxes:
           bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key=bounding_box_key, frame_index=frame_index, whale_index=whale_index)
           if bounding_box_4xy is not None:
             bounding_box_points = np.array([bounding_box_4xy[0:2], bounding_box_4xy[2:4],
                                             bounding_box_4xy[4:6], bounding_box_4xy[6:8]], np.int32).reshape((-1, 1, 2))
+            linewidth = linewidth_thicker if bounding_box_key == 'full' else linewidth_thinner
+            cv2.polylines(img_bgr_annotated, [bounding_box_points], True,
+                          (0,0,0),
+                          linewidth + max([1, round(linewidth*0.1)]))
             cv2.polylines(img_bgr_annotated, [bounding_box_points], True,
                           bounding_box_colors[bounding_box_key],
                           linewidth_thicker if bounding_box_key == 'full' else linewidth_thinner)
@@ -3219,6 +3239,19 @@ class Segmentations:
                                         whale_color, # value to fill
                                         -1) # -1 means fill rather than only outline
           img_bgr_annotated = cv2.addWeighted(img_bgr_annotated, 1, color_mask, mask_alpha, 0)
+          if mask_outline_indicate_id_exists:
+            outline_color = color_no_ID
+            if len(self.get_whale_id(whale_index=whale_index)) > 0:
+              if not self.get_whale_ids_is_auto()[whale_index]:
+                outline_color = color_with_ID
+            img_bgr_annotated = cv2.drawContours(img_bgr_annotated, mask_contours,
+                                                 -1, # -1 means to draw all contours in the given list
+                                                 (0,0,0), # value to fill
+                                                 linewidth_thinner + max([2, round(linewidth_thinner*0.1)])) # -1 means fill rather than only outline
+            img_bgr_annotated = cv2.drawContours(img_bgr_annotated, mask_contours,
+                                                 -1, # -1 means to draw all contours in the given list
+                                                 outline_color, # value to fill
+                                                 linewidth_thinner) # -1 means fill rather than only outline
       # Draw the centroid.
       if show_centroids:
         centroid_xy = self.get_centroid_xy(frame_index=frame_index, whale_index=whale_index)
@@ -3245,13 +3278,17 @@ class Segmentations:
           orientation_color_red = round(255*(1-orientation_confidence))
           orientation_color_green = round(255*orientation_confidence)
           orientation_color = (0, orientation_color_green, orientation_color_red)
-          # Draw the start point.
-          cv2.circle(img_bgr_annotated, orientation_start_point,
-                     round(circle_radius*0.8), orientation_color, -1)
           # Draw the orientation vector.
+          cv2.line(img_bgr_annotated, orientation_start_point, orientation_end_point,
+                   (0,0,0), linewidth_thicker + max([1, round(linewidth_thicker*0.1)]))
           cv2.line(img_bgr_annotated, orientation_start_point, orientation_end_point,
                    orientation_color,
                    linewidth_thicker)
+          # Draw the start point.
+          cv2.circle(img_bgr_annotated, orientation_start_point,
+                     round(circle_radius*0.8)+max([1, round(circle_radius*0.1)]), (0,0,0), -1)
+          cv2.circle(img_bgr_annotated, orientation_start_point,
+                     round(circle_radius*0.8), orientation_color, -1)
         else:
           # The segmentation did not exist for this whale in this frame.
           pass
