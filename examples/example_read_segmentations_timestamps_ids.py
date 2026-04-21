@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2026 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,8 +20,7 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
-# [add additional updates and authors as desired]
+# Created 2024-2026 by Joseph DelPreto [https://josephdelpreto.com].
 #
 ############
 
@@ -83,31 +82,39 @@ segmentations = Segmentations(
 # Example usage: whale IDs, numbers, indexes
 #########################################
 
-# Get whale IDs.
-# These are the whale names, and are ordered by matrix index.
-whale_ids = segmentations.get_whale_ids()
-
-# Get whale ID numbers.
+# Get ID numbers.
 # These are the persistent numbers shown in Whale Tales, and are ordered by matrix index.
-whale_id_numbers = segmentations.get_whale_id_numbers()
+id_numbers = segmentations.get_id_numbers()
+
+# Get ID names.
+# These are ordered by matrix index.
+all_id_names = segmentations.get_all_id_names()
+
+# Get ID species.
+# These are ordered by matrix index.
+# These can be "Sperm Whale", "Pilot Whale", "Frasers Dolphin", or blank.
+all_id_species = segmentations.get_all_id_species()
 
 # Helper functions are also available to convert between these.
-whale_id = segmentations.get_whale_id(whale_id_number=0)
-whale_id = segmentations.get_whale_id(whale_index=0)
-whale_index = segmentations.get_whale_index_for_whale_id_number(whale_id_number=0)
-whale_id_number = segmentations.get_whale_id_number(whale_index=0)
+id_name = segmentations.get_id_name(id_number=0)
+id_name = segmentations.get_id_name(whale_index=0)
+whale_index = segmentations.get_whale_index_for_id_number(id_number=0)
+id_number = segmentations.get_id_number(whale_index=0)
+id_species = segmentations.get_id_species(id_number=0)
+id_species = segmentations.get_id_species(whale_index=0)
 
 # Get whether IDs are auto-generated.
-ids_is_auto = segmentations.get_whale_ids_is_auto()
+ids_is_auto = segmentations.get_ids_is_auto()
 
 # Print whale information to help clarify the above arrays.
 print()
-print('See the following whale IDs and ID numbers:')
-for whale_index in range(len(whale_ids)):
-  whale_id_number = whale_id_numbers[whale_index]
-  whale_id = whale_ids[whale_index]
+print('See the following IDs:')
+for whale_index in range(len(all_id_names)):
+  id_number = id_numbers[whale_index]
+  id_name = all_id_names[whale_index]
+  id_species = all_id_species[whale_index]
   is_auto_id = ids_is_auto[whale_index]
-  print('  Matrix index %2d | ID number %2d | auto? %d | ID "%s"' % (whale_index, whale_id_number, is_auto_id, whale_id))
+  print('  Matrix index %2d | number %2d | auto? %d | species: %s | name: %s' % (whale_index, id_number, is_auto_id, id_species.ljust(15), id_name))
 
 #########################################
 # Example usage: timestamps

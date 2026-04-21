@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2026 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,7 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
+# Created 2023-2026 by Joseph DelPreto [https://josephdelpreto.com].
 # [add additional updates and authors as desired]
 #
 ############
@@ -38,17 +38,14 @@ from segmentation_infrastructure.helpers.helpers_various import *
 
 current_script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir = os.path.join(current_script_dir, '..', 'data')
-segmentations_dir = os.path.join(data_dir, 'segmentations')
-videos_dir = os.path.join(data_dir, 'videos')
-video_num = 1688829151574
-
-h5_filepath = os.path.join(segmentations_dir,
+video_num = 1688829151574 # 1688830960531
+h5_filepath = os.path.join(data_dir, 'segmentations',
                            '%013d_segmentations.hdf5' % video_num)
 
 # If you would not like to read videos, you can just define an empty dictionary:
 # video_filepaths = {}
 video_filepaths = {
-  'original'                : os.path.join(videos_dir, '%013d.mp4' % video_num),
+  'original'                : os.path.join(data_dir, 'videos', '%013d_compressed.mp4' % video_num),
 }
 
 # If using videos, will scale example outputs to fit on the monitor.
@@ -117,9 +114,12 @@ print()
 #   I is the maximum number of whales
 #   Each entry is 0 or 1, indicating whether that whale was found in that frame.
 #
-# whale_ids and whale_id_numbers will be Ix1
+# all_id_names and all_id_numbers will be Ix1
 #   I is the maximum number of whales
 #   Each entry is the ID (whale name) or ID number (persistent) associated with that whale index.
+# all_id_species will be Ix1
+#   I is the maximum number of whales
+#   Each entry is "Sperm Whale", "Pilot Whale", "Frasers Dolphin", or blank
 #
 #######################################################################
 
@@ -161,9 +161,10 @@ frames_are_segmented = segmentations.get_frames_are_segmented()
 # Get whether segmentations were found for each whale in each frame.
 whale_segmentations_exist = segmentations.get_whale_segmentations_exist()
 
-# Get the whale ID name or number for each whale index.
-whale_ids = segmentations.get_whale_ids()
-whale_id_numbers = segmentations.get_whale_id_numbers()
+# Get the ID name, number, and species for each whale index.
+all_id_names = segmentations.get_all_id_names()
+all_id_numbers = segmentations.get_id_numbers()
+all_id_species = segmentations.get_all_id_species()
 
 print(' See the following matrix shapes')
 if segmentations.have_masks(): # filtered versions of the data may not have masks
@@ -176,14 +177,15 @@ print('  orientations_rad: type %s of %s | shape' % (type(orientations_rad), ori
 print('  orientations_confidence: type %s of %s | shape' % (type(orientations_confidence), orientations_confidence.dtype), orientations_confidence.shape)
 print('  frames_are_segmented: type %s of %s | shape' % (type(frames_are_segmented), frames_are_segmented.dtype), frames_are_segmented.shape)
 print('  whale_segmentations_exist: type %s of %s | shape' % (type(whale_segmentations_exist), whale_segmentations_exist.dtype), whale_segmentations_exist.shape)
-print('  whale_ids: type %s of %s | length' % (type(whale_ids), type(whale_ids[0])), len(whale_ids))
-print('  whale_id_numbers: type %s of %s | length' % (type(whale_id_numbers), type(whale_id_numbers[0])), len(whale_id_numbers))
+print('  all_id_names: type %s of %s | length' % (type(all_id_names), type(all_id_names[0])), len(all_id_names))
+print('  all_id_numbers: type %s of %s | length' % (type(all_id_numbers), type(all_id_numbers[0])), len(all_id_numbers))
+print('  all_id_species: type %s of %s | length %d | unique values %s' % (type(all_id_species), type(all_id_species[0]), len(all_id_species), list(set(all_id_species))))
 
 ###################################
 # Use the matrices spanning all frames to get data for a particular frame and whale instance.
 frame_index = 3
-whale_id_number = 1
-whale_index = segmentations.get_whale_index_for_whale_id_number(whale_id_number)
+id_number = 1
+whale_index = segmentations.get_whale_index_for_id_number(id_number)
 
 if segmentations.have_masks(): # filtered versions of the data may not have masks
   # Get the mask contours for this whale and frame.
@@ -245,8 +247,8 @@ print()
 print('-'*50)
 print('Getting data for a particular frame and whale')
 frame_index = 3
-whale_id_number = 1
-whale_index = segmentations.get_whale_index_for_whale_id_number(whale_id_number)
+id_number = 1
+whale_index = segmentations.get_whale_index_for_id_number(id_number)
 
 # Check whether the segmentation exists for this whale in this frame.
 whale_is_present = whale_segmentations_exist[frame_index, whale_index]
@@ -319,19 +321,19 @@ print()
 print('-'*50)
 print('Getting annotations and the edit history')
 
-annotations_whale_ids = segmentations.get_annotations_whale_ids()
+annotations_ids = segmentations.get_annotations_ids()
 annotations_behaviors = segmentations.get_annotations_behaviors()
 annotations_notes = segmentations.get_annotations_notes()
 history_log = segmentations.get_history()
 
-print(' See the following annotations of whale IDs:')
-print_dict(annotations_whale_ids, level=1)
-print(' See the following annotations of whale behaviors:')
-print_dict(annotations_behaviors, level=1)
-print(' See the following annotations of general notes:')
-print_dict(annotations_notes, level=1)
-print(' See the following history of the HDF5 file:')
-print_dict(history_log, level=1)
+# print(' See the following annotations of IDs:')
+# print_dict(annotations_ids, level=1)
+# print(' See the following annotations of behaviors:')
+# print_dict(annotations_behaviors, level=1)
+# print(' See the following annotations of general notes:')
+# print_dict(annotations_notes, level=1)
+# print(' See the following history of the HDF5 file:')
+# print_dict(history_log, level=1)
 print()
 
 ###############################
@@ -502,7 +504,7 @@ t0 = time.time()
 segmentations_copy.swap_whale_indexes(whale_index_1=4, whale_index_2=5,
                                       frame_index_start=frame_indexes_to_edit[0],
                                       frame_index_end=frame_indexes_to_edit[-1],
-                                      swap_whale_ids=False)
+                                      swap_ids=False)
 print('Completed in %0.2fs' % (time.time() - t0))
 
 print()
@@ -561,7 +563,7 @@ for video_key in video_filepaths:
                                                       show_centroids=False,
                                                       show_orientations=False,
                                                       show_boxes=None,
-                                                      show_whale_id_numbers=True,
+                                                      show_id_numbers=True,
                                                       show_whale_indexes=False))
   else:
     imgs_rgb_annotated.append(segmentations.get_video_frame(video_key=video_key, frame_index=frame_index_toFetch,
@@ -569,21 +571,21 @@ for video_key in video_filepaths:
                                                       show_centroids=True,
                                                       show_orientations=False,
                                                       show_boxes=['full'],
-                                                      show_whale_id_numbers=True,
+                                                      show_id_numbers=True,
                                                       show_whale_indexes=False))
   imgs_rgb_annotated.append(segmentations.get_video_frame(video_key=video_key, frame_index=frame_index_toFetch,
                                                     show_masks=False,
                                                     show_centroids=True,
                                                     show_orientations=True,
                                                     show_boxes=['full'],
-                                                    show_whale_id_numbers=False,
+                                                    show_id_numbers=False,
                                                     show_whale_indexes=False))
   imgs_rgb_annotated.append(segmentations.get_video_frame(video_key=video_key, frame_index=frame_index_toFetch,
                                                     show_masks=False,
                                                     show_centroids=False,
                                                     show_orientations=False,
                                                     show_boxes=['full', 'head', 'tail'],
-                                                    show_whale_id_numbers=False,
+                                                    show_id_numbers=False,
                                                     show_whale_indexes=False))
 
   # Show the original frame and the annotated frames side by side.
@@ -637,7 +639,7 @@ fig = segmentations.visualize_segmentations(frame_index=frame_index_toFetch,
                                             show_centroids=True,
                                             show_orientations=True,
                                             show_boxes=['full', 'head', 'tail'],
-                                            show_whale_id_numbers=True,
+                                            show_id_numbers=True,
                                             show_whale_indexes=False)
 print('  Close the figure to continue')
 plt.show(block=True)

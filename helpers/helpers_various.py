@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2025 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2026 Joseph DelPreto / MIT CSAIL and Project CETI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -20,8 +20,8 @@
 # WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-# Created 2023-2025 by Joseph DelPreto [https://josephdelpreto.com].
-# [add additional updates and authors as desired]
+# Created 2023-2026 by Joseph DelPreto [https://josephdelpreto.com].
+# [can add additional updates and authors as desired]
 #
 ############
 
@@ -37,6 +37,8 @@ import numpy as np
 import dateutil.parser
 from datetime import datetime
 import os
+from pathlib import Path
+import uuid
 
 try:
   import pyqtgraph
@@ -47,6 +49,17 @@ except:
   have_pyqt = False
   
 from collections import OrderedDict
+
+try:
+  from csail_data_processing.DecordVideoReaderWrapper import DecordVideoReaderWrapper
+except:
+  try:
+    from helpers.DecordVideoReaderWrapper import DecordVideoReaderWrapper
+  except:
+    try:
+      from DecordVideoReaderWrapper import DecordVideoReaderWrapper
+    except:
+      pass
 
 ############################################
 # TIME
@@ -96,6 +109,9 @@ def time_str_to_time_s(time_str):
 def gps_to_distance(longitude_deg, latitude_deg, reference_location_lonLat_deg=(-61.373179, 15.306914), units='m'):
   return (longitude_to_distance(longitude_deg, reference_location_lonLat_deg=reference_location_lonLat_deg, units=units),
           latitude_to_distance(latitude_deg, reference_location_lonLat_deg=reference_location_lonLat_deg, units=units))
+def distance_to_gps(x, y, reference_location_lonLat_deg=(-61.373179, 15.306914), units='m'):
+  return (distance_to_longitude(x, reference_location_lonLat_deg=reference_location_lonLat_deg, units=units),
+          distance_to_latitude(y, reference_location_lonLat_deg=reference_location_lonLat_deg, units=units))
 
 # Convert a GPS longitude to meters from a reference location.
 # longitude_deg may be a list or numpy array to convert multiple values.
@@ -112,6 +128,17 @@ def longitude_to_distance(longitude_deg, reference_location_lonLat_deg=(-61.3731
   else:
     raise ValueError('Unknown units [%s]' % units)
   return (longitude_deg - reference_location_lonLat_deg[0])*conversion_factor
+def distance_to_longitude(x, reference_location_lonLat_deg=(-61.373179, 15.306914), units='m'):
+  if isinstance(x, (list, tuple)):
+    x = np.array(x)
+  conversion_factor_lon_to_km = (40075 * np.cos(np.radians(reference_location_lonLat_deg[1])) / 360) # From simplified Haversine formula: https://stackoverflow.com/a/39540339
+  if units.lower() in ['km', 'kilometer', 'kilometers']:
+    conversion_factor = conversion_factor_lon_to_km
+  elif units.lower() in ['m', 'meter', 'meters']:
+    conversion_factor = conversion_factor_lon_to_km*1000.0
+  else:
+    raise ValueError('Unknown units [%s]' % units)
+  return x/conversion_factor + reference_location_lonLat_deg[0]
 
 # Convert a GPS latitude to meters from a reference location.
 # latitude_deg may be a list or numpy array to convert multiple values.
@@ -128,6 +155,17 @@ def latitude_to_distance(latitude_deg, reference_location_lonLat_deg=(-61.373179
   else:
     raise ValueError('Unknown units [%s]' % units)
   return (latitude_deg - reference_location_lonLat_deg[1])*conversion_factor
+def distance_to_latitude(y, reference_location_lonLat_deg=(-61.373179, 15.306914), units='m'):
+  if isinstance(y, (list, tuple)):
+    y = np.array(y)
+  conversion_factor_lat_to_km = (111.32) # From simplified Haversine formula: https://stackoverflow.com/a/39540339
+  if units.lower() in ['km', 'kilometer', 'kilometers']:
+    conversion_factor = conversion_factor_lat_to_km
+  elif units.lower() in ['m', 'meter', 'meters']:
+    conversion_factor = conversion_factor_lat_to_km*1000.0
+  else:
+    raise ValueError('Unknown units [%s]' % units)
+  return y/conversion_factor + reference_location_lonLat_deg[1]
 
 ############################################
 # FILES AND TYPES
@@ -226,7 +264,7 @@ def load_image(filepath, target_width=None, target_height=None, method='pil'):
 # Using decord is fastest and most accurate for frame seeking.
 # target_width and target_height are only used for the 'decord' method.
 #  Will then scale the frames as they are loaded to the target size (maintaining aspect ratio).
-def get_video_reader(filepath, target_width=None, target_height=None, method='decord'):
+def get_video_reader(filepath, target_width=None, target_height=None, method='decord_wrapper'):
   video_reader = None
   frame_rate = None
   num_frames = None
@@ -242,6 +280,16 @@ def get_video_reader(filepath, target_width=None, target_height=None, method='de
       video_reader = decord.VideoReader(filepath, width=img.shape[1], height=img.shape[0])
     frame_rate = video_reader.get_avg_fps()
     num_frames = len(video_reader)
+  elif method.lower() == 'decord_wrapper':
+    video_reader = DecordVideoReaderWrapper(filepath)
+    if target_width is not None or target_height is not None:
+      img = video_reader[0].asnumpy()
+      img = scale_image(img, target_width, target_height)
+      video_reader = DecordVideoReaderWrapper(filepath, width=img.shape[1], height=img.shape[0])
+    frame_rate = video_reader.get_avg_fps()
+    num_frames = len(video_reader)
+  else:
+    raise AssertionError('Unknown method "%s" requested for get_video_reader' % method)
   return (video_reader, frame_rate, num_frames)
   
 # Load a specified frame from a video reader.
@@ -484,23 +532,28 @@ def compress_video(input_filepath, output_filepath, target_total_bitrate_b_s):
     video_bitrate = target_total_bitrate_b_s
   
   # Compress!
+  log_prefix = Path(".") / f"ffmpeg2pass_{uuid.uuid4().hex}"
   i = ffmpeg.input(input_filepath)
   # Pass 1
   ffmpeg_args = {
     'c:v': 'libx264',
     'b:v': video_bitrate,
     'pass': 1,
+    'passlogfile': str(log_prefix),
     'f': 'mp4',
     'loglevel':'error',
   }
   ffmpeg.output(i, os.devnull,
                 **ffmpeg_args
-                ).overwrite_output().run()
+                )\
+    .overwrite_output()\
+    .run()
   # Pass 2
   ffmpeg_args = {
     'c:v': 'libx264',
     'b:v': video_bitrate,
     'pass': 2,
+    'passlogfile': str(log_prefix),
     'c:a': 'aac',
     'loglevel': 'error',
   }
@@ -508,7 +561,16 @@ def compress_video(input_filepath, output_filepath, target_total_bitrate_b_s):
     ffmpeg_args['b:a'] = audio_bitrate
   ffmpeg.output(i, output_filepath,
                 **ffmpeg_args
-                ).overwrite_output().run()
+                )\
+    .overwrite_output()\
+    .run()
+  # Remove the log files.
+  for ext in ("-0.log", "-0.log.mbtree"):
+    try:
+      os.remove(str(log_prefix) + ext)
+    except FileNotFoundError:
+      pass
+
 
 ############################################
 # Timeseries
