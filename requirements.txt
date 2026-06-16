@@ -1,0 +1,9 @@
+﻿PyQt6
+opencv-python
+numpy
+h5py
+decord
+scipy
+matplotlib
+distinctipy
+ffmpeg-python
