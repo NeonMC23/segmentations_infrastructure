@@ -1,7 +1,7 @@
 
 ############
 #
-# Copyright (c) 2026 Joseph DelPreto / MIT CSAIL and Project CETI
+# Copyright (c) 2026 MIT CSAIL and Project CETI / Joseph DelPreto
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +21,7 @@
 # IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
 # Created 2023-2026 by Joseph DelPreto [https://josephdelpreto.com].
-# [add additional updates and authors as desired]
+# [add additional major updates and authors here as desired]
 #
 ############
 
@@ -564,6 +564,8 @@ class Segmentations:
   def whale_segmentation_exists(self, whale_index, frame_indexes=None):
     if self._whale_segmentations_exist is None:
       return None
+    if whale_index is None:
+      return None
     if whale_index >= self._whale_segmentations_exist.shape[1]:
       return None
     if frame_indexes is None:
@@ -877,7 +879,7 @@ class Segmentations:
       if fieldnames is not None and key not in fieldnames:
         continue
       if key == 'timestamps_s':
-        history_info[key] = timestamps_s
+        history_info[key] = timestamps_s[row_index_start:]
       else:
         history_info[key] = np.array(self._datasets['history'][key])
     return history_info
@@ -1677,13 +1679,13 @@ class Segmentations:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
       raise AssertionError('Segmentations was opened in read-only mode')
+    # Expand datasets before logging so history can resolve ID numbers for new whales.
+    self._expand_datasets(frame_index, whale_index)
     # Add a log entry for the action.
     author = author or self._author
     if log_in_history:
       self.add_history_entry(summary='add_bounding_box', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
                              timestamp_s=time.time(), author=author)
-    # Expand datasets if needed.
-    self._expand_datasets(frame_index, whale_index)
     # Get the dataset pointer.
     dataset_name = self._bounding_box_key_to_name(bounding_box_key)
     dataset = self._datasets[dataset_name]
@@ -1859,13 +1861,13 @@ class Segmentations:
       raise AssertionError('Segmentations was opened in read-only mode')
     if centroid_yx is None and centroid_xy is None:
       raise AssertionError('No centroid was provided')
+    # Expand datasets before logging so history can resolve ID numbers for new whales.
+    self._expand_datasets(frame_index, whale_index)
     # Add a log entry for the action.
     author = author or self._author
     if log_in_history:
       self.add_history_entry(summary='add_centroid', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
                              timestamp_s=time.time(), author=author)
-    # Expand datasets if needed.
-    self._expand_datasets(frame_index, whale_index)
     # Fetch the dataset pointer.
     dataset = self._datasets['centroids_xy']
     # Write the new entry.
@@ -2005,13 +2007,13 @@ class Segmentations:
       raise AssertionError('No HDF5 filepath was provided.')
     if not self._writable:
       raise AssertionError('Segmentations was opened in read-only mode')
+    # Expand datasets before logging so history can resolve ID numbers for new whales.
+    self._expand_datasets(frame_index, whale_index)
     # Add a log entry for the action.
     author = author or self._author
     if log_in_history:
       self.add_history_entry(summary='add_orientation', details=dict([(k,v) for (k,v) in locals().items() if k not in ['self']]),
                              timestamp_s=time.time(), author=author)
-    # Expand datasets if needed.
-    self._expand_datasets(frame_index, whale_index)
     # Fetch the datset pointer.
     dataset = self._datasets['orientations_rad_confidence']
     # Write the new entry.
@@ -2635,7 +2637,7 @@ class Segmentations:
         try:
           plt.get_current_fig_manager().window.showMaximized()
         except:
-          pass
+          pass # the above has an error with newer Python versions - should look up new maximization method
         axs[0][0].grid(True, color='lightgray')
         axs[1][0].grid(True, color='lightgray')
         axs[0][0].plot(centroids_forWhale[:,0])
@@ -2732,7 +2734,7 @@ class Segmentations:
         try:
           plt.get_current_fig_manager().window.showMaximized()
         except:
-          pass
+          pass # the above has an error with newer Python versions - should look up new maximization method
         axs[0][0].grid(True, color='lightgray')
         axs[1][0].grid(True, color='lightgray')
         axs[0][0].plot(np.degrees(orientations_rad_confidence_forWhale[:,0]))
@@ -2904,7 +2906,7 @@ class Segmentations:
           try:
             plt.get_current_fig_manager().window.showMaximized()
           except:
-            pass
+            pass # the above has an error with newer Python versions - should look up new maximization method
           for row_index in range(4):
             for col_index in range(2):
               axs[row_index][col_index].plot(boxes_forWhale[:,row_index,col_index])
@@ -3322,9 +3324,16 @@ class Segmentations:
                                   + orientation_length*np.array([np.cos(orientation_rad), -np.sin(orientation_rad)])
           orientation_end_point = [round(coord) for coord in orientation_end_point]
           # Compute the orientation color to represent the confidence.
-          orientation_color_red = round(255*(1-orientation_confidence))
-          orientation_color_green = round(255*orientation_confidence)
-          orientation_color = (0, orientation_color_green, orientation_color_red)
+          try:
+            orientation_confidence = float(orientation_confidence)
+            if not np.isfinite(orientation_confidence):
+              raise ValueError
+            orientation_confidence = max(0, min(1, orientation_confidence))
+            orientation_color_red = round(255*(1-orientation_confidence))
+            orientation_color_green = round(255*orientation_confidence)
+            orientation_color = (0, orientation_color_green, orientation_color_red)
+          except:
+            orientation_color = (255, 255, 255)
           # Draw the orientation vector.
           cv2.line(img_bgr_annotated, orientation_start_point, orientation_end_point,
                    (0,0,0), linewidth_thicker + max([1, round(linewidth_thicker*0.1)]))
@@ -3393,7 +3402,7 @@ class Segmentations:
       try:
         plt.get_current_fig_manager().window.showMaximized()
       except:
-        pass
+        pass # the above has an error with newer Python versions - should look up new maximization method
       
     # Define sizes based on the frame size.
     linewidth_thicker = 3
@@ -3448,7 +3457,13 @@ class Segmentations:
         (orientation_rad, orientation_confidence) = self.get_orientation_rad_confidence(frame_index=frame_index, whale_index=whale_index)
         if orientation_rad is not None:
           # Clip the confidence to be between 0 and 1.
-          orientation_confidence = max(0, min(1, orientation_confidence))
+          try:
+            orientation_confidence = float(orientation_confidence)
+            if not np.isfinite(orientation_confidence):
+              raise ValueError
+            orientation_confidence = max(0, min(1, orientation_confidence))
+          except:
+            orientation_confidence = None
           # Compute the orientation vector length as the length of the bounding box.
           bounding_box_4xy = self.get_bounding_box_4xy(bounding_box_key='full', frame_index=frame_index, whale_index=whale_index)
           bounding_boxes_4xy_reshaped = bounding_box_4xy.reshape((-1, 2))
@@ -3460,10 +3475,13 @@ class Segmentations:
                                   + orientation_length*np.array([np.cos(orientation_rad), -np.sin(orientation_rad)])
           orientation_end_point = [round(coord) for coord in orientation_end_point]
           # Compute the orientation color to represent the confidence.
-          orientation_color_red = round(255*(1-orientation_confidence))
-          orientation_color_green = round(255*orientation_confidence)
-          orientation_color = (orientation_color_red, orientation_color_green, 0)
-          orientation_color = np.array(orientation_color)/255
+          if orientation_confidence is None:
+            orientation_color = np.array((1, 1, 1))
+          else:
+            orientation_color_red = round(255*(1-orientation_confidence))
+            orientation_color_green = round(255*orientation_confidence)
+            orientation_color = (orientation_color_red, orientation_color_green, 0)
+            orientation_color = np.array(orientation_color)/255
           # Draw the start point.
           plt.gca().add_patch(Circle(
                 orientation_start_point,
@@ -3533,7 +3551,7 @@ class Segmentations:
     try:
       plt.get_current_fig_manager().window.showMaximized()
     except:
-      pass
+      pass # the above has an error with newer Python versions - should look up new maximization method
   
     # Define plotting parameters.
     trajectory_linewidth = 2
